@@ -1,4 +1,4 @@
-// STEP 1: rail-network graph + Dijkstra, rendered in the live ImGui window.
+// OHT-MCS Simulator: rail network plus a time-step OHT simulation in the live ImGui window.
 // Run with --selftest to render a few frames and exit (sanity check).
 
 #include "imgui.h"
@@ -8,14 +8,17 @@
 
 #include "rail/RailNetwork.h"
 #include "rail/FabTopology.h"
+#include "render/RailView.h"
 #include "render/RailRenderer.h"
+#include "render/VehicleRenderer.h"
+#include "sim/Simulation.h"
 
 #include <GLFW/glfw3.h>
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 static void glfw_error_callback(int error, const char* description) {
     std::fprintf(stderr, "GLFW Error %d: %s\n", error, description);
@@ -74,18 +77,9 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // sample data for the plot
-    float xs[200];
-    float ys[200];
-    for (int i = 0; i < 200; ++i) {
-        xs[i] = i * 0.05f;
-        ys[i] = std::sin(xs[i]);
-    }
-
-    bool show_implot_demo = false;
     const ImVec4 clear_color = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
 
-    // STEP 1: build the synthetic fab, find one shortest path, report it once to stdout.
+    // Build the synthetic fab and report one shortest path once (the bottleneck demo).
     rail::FabDemo demo;
     rail::RailNetwork net = rail::buildSyntheticFab(demo);
     rail::PathResult path = rail::dijkstra(net, demo.start, demo.goal);
@@ -108,32 +102,70 @@ int main(int argc, char** argv) {
     rail_style.bottleneck_thick *= ui_scale;
     rail_style.path_thick *= ui_scale;
 
+    // Simulation: OHTs carry jobs across the fab. Driven by the fixed-dt accumulator in the loop.
+    sim::SimConfig sim_cfg;
+    sim::Simulation simulation(net, sim_cfg);
+    int ui_oht_count = sim_cfg.oht_count;
+    float ui_arrival = sim_cfg.arrival_per_sec;
+    float sim_speed = 4.0f;
+
+    const float kFixedDt = 0.05f;
+    float sim_accum = 0.0f;
+    float plot_timer = 0.0f;
+    const int kPlotCap = 400;  // fixed-size scrolling window for the throughput plot
+    std::vector<float> tput_time(kPlotCap, 0.0f);
+    std::vector<float> tput_value(kPlotCap, 0.0f);
+    int tput_count = 0;
+    int tput_head = 0;
+
     int frame = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // Advance the sim in fixed steps; clamp substeps so a slow frame cannot spiral.
+        float frame_dt = io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f);
+        sim_accum += frame_dt * sim_speed;
+        int substeps = 0;
+        while (sim_accum >= kFixedDt && substeps < 5) {
+            simulation.step(kFixedDt);
+            sim_accum -= kFixedDt;
+            ++substeps;
+        }
+        if (substeps == 5) sim_accum = 0.0f;
+
+        sim::SimStats st = simulation.stats();
+        plot_timer += frame_dt * sim_speed;
+        if (plot_timer >= 0.5f) {
+            plot_timer = 0.0f;
+            tput_time[tput_head] = st.sim_time;
+            tput_value[tput_head] = st.throughput_per_min;
+            tput_head = (tput_head + 1) % kPlotCap;
+            if (tput_count < kPlotCap) ++tput_count;
+        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::Begin("Status");
-        ImGui::Text("%.1f FPS", io.Framerate);
-        ImGui::Text("Nodes %d, segments %d. Ports are drawn as squares.",
-                    (int)net.nodes().size(), (int)net.segments().size());
-        if (path.found) {
-            ImGui::Text("Shortest path %s -> %s: distance %.1f (%d segments)",
-                        net.nodes()[demo.start].name.c_str(),
-                        net.nodes()[demo.goal].name.c_str(),
-                        path.distance, (int)path.segments.size());
-            ImGui::TextColored(ImVec4(0.95f, 0.67f, 0.24f, 1.0f),
-                               "Amber = bottleneck, green = path (amber shows as a border where they overlap).");
-        }
-        ImGui::Checkbox("Show ImPlot demo", &show_implot_demo);
+        ImGui::Begin("Simulation");
+        ImGui::Text("%.1f FPS   sim time %.0f s", io.Framerate, st.sim_time);
+        if (ImGui::SliderInt("OHT count", &ui_oht_count, 1, 60)) simulation.setTargetOhtCount(ui_oht_count);
+        if (ImGui::SliderFloat("Job arrival /s", &ui_arrival, 0.05f, 3.0f, "%.2f")) simulation.setArrivalRate(ui_arrival);
+        ImGui::SliderFloat("Sim speed x", &sim_speed, 0.0f, 20.0f, "%.1f");
         ImGui::Separator();
-        if (ImPlot::BeginPlot("sample signal", ImVec2(-1, 180))) {
-            ImPlot::PlotLine("sin(x)", xs, ys, 200);
+        ImGui::Text("OHT live %d / target %d   (busy %d, retiring %d)",
+                    st.vehicles_live, st.vehicles_target, st.vehicles_busy, st.vehicles_retiring);
+        ImGui::Text("Jobs: pending %d, active %d, done %d", st.jobs_pending, st.jobs_active, st.jobs_done);
+        ImGui::Text("Throughput %.1f /min      Utilization %.0f%%", st.throughput_per_min, st.utilization * 100.0f);
+        ImGui::Text("Cycle time avg %.1f, p95 %.1f (create to done)", st.avg_delivery, st.p95_delivery);
+        if (tput_count > 0 && ImPlot::BeginPlot("Throughput", ImVec2(-1, 160))) {
+            int offset = (tput_count == kPlotCap) ? tput_head : 0;
+            ImPlot::SetupAxes("sim time (s)", "jobs/min");
+            ImPlot::PlotLine("throughput", tput_time.data(), tput_value.data(), tput_count, 0, offset, sizeof(float));
             ImPlot::EndPlot();
         }
+        ImGui::TextColored(ImVec4(0.55f, 0.78f, 0.98f, 1.0f),
+                           "Cyan = empty OHT, yellow = carrying, grey = idle.");
         ImGui::End();
 
         ImGui::Begin("Rail Network");
@@ -141,11 +173,26 @@ int main(int argc, char** argv) {
         ImVec2 canvas_size = ImGui::GetContentRegionAvail();
         if (canvas_size.x < 50.0f) canvas_size.x = 50.0f;
         if (canvas_size.y < 50.0f) canvas_size.y = 50.0f;
-        render::drawRailNetwork(ImGui::GetWindowDrawList(), canvas_origin, canvas_size, net, path, rail_style);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        render::RailView view = render::makeRailView(canvas_origin, canvas_size, net, rail_style.pad);
+        render::drawRailNetwork(dl, view, net, path, rail_style);
+
+        // Bridge the sim to the renderer here so neither core depends on the other.
+        std::vector<render::VehicleMarker> markers;
+        markers.reserve(simulation.vehicles().size());
+        for (const sim::Vehicle& v : simulation.vehicles()) {
+            if (!v.alive) continue;
+            int state = 0;
+            if (v.state == sim::VehState::ToPickup) state = 1;
+            else if (v.state == sim::VehState::Carrying) state = 2;
+            markers.push_back(render::VehicleMarker{simulation.vehicleWorldPos(v), state});
+        }
+        render::VehicleStyle veh_style;
+        veh_style.radius = rail_style.port_half * 1.15f;
+        render::drawVehicles(dl, view, markers, veh_style);
+
         ImGui::Dummy(canvas_size);
         ImGui::End();
-
-        if (show_implot_demo) ImPlot::ShowDemoWindow(&show_implot_demo);
 
         ImGui::Render();
         int display_w, display_h;

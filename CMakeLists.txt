@@ -48,7 +48,10 @@ add_executable(${PROJECT_NAME}
 
   src/rail/RailNetwork.cpp
   src/rail/FabTopology.cpp
+  src/sim/Simulation.cpp
+  src/sim/AssignmentPolicy.cpp
   src/render/RailRenderer.cpp
+  src/render/VehicleRenderer.cpp
 
   # Dear ImGui core
   ${imgui_SOURCE_DIR}/imgui.cpp
