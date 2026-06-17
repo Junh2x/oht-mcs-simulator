@@ -46,6 +46,10 @@ find_package(OpenGL REQUIRED)
 add_executable(${PROJECT_NAME}
   src/main.cpp
 
+  src/rail/RailNetwork.cpp
+  src/rail/FabTopology.cpp
+  src/render/RailRenderer.cpp
+
   # Dear ImGui core
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
