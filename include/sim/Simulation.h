@@ -79,6 +79,7 @@ public:
     const std::vector<Vehicle>& vehicles() const { return vehicles_; }
     rail::Vec2 vehicleWorldPos(const Vehicle& v) const;
     float segmentLoad(rail::SegmentId s) const { return static_cast<float>(seg_occupancy_[s]); }  // STEP 7 hook
+    int pendingCount() const { return static_cast<int>(pending_.size()); }  // queue size, for accounting checks
     SimStats stats() const;
 
 private:

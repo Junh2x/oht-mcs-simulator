@@ -80,7 +80,6 @@ void Simulation::assignJobs() {
         JobId jid = pending_.front();
         VehicleId vid = assign_(vehicles_, jobs_[jid], net_);
         if (vid < 0) break;  // no idle vehicle available this step
-        pending_.pop_front();
 
         Job& job = jobs_[jid];
         Vehicle& v = vehicles_[vid];

@@ -118,6 +118,21 @@ int main(int argc, char** argv) {
     int tput_count = 0;
     int tput_head = 0;
 
+    if (selftest) {
+        // Headless smoke test: overload the assignment path and verify job accounting holds.
+        sim::SimConfig stress_cfg;
+        stress_cfg.oht_count = 3;
+        stress_cfg.arrival_per_sec = 5.0f;
+        sim::Simulation stress(net, stress_cfg);
+        for (int s = 0; s < 4000; ++s) stress.step(0.05f);
+        sim::SimStats ss = stress.stats();
+        bool ok = ss.jobs_pending == stress.pendingCount() && ss.jobs_done > 0;
+        std::printf("selftest sim: done %d, active %d, pending %d (queue %d) => %s\n",
+                    ss.jobs_done, ss.jobs_active, ss.jobs_pending, stress.pendingCount(),
+                    ok ? "OK" : "FAIL");
+        if (!ok) return 1;
+    }
+
     int frame = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
