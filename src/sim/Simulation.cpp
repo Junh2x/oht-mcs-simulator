@@ -18,6 +18,7 @@ Simulation::Simulation(const rail::RailNetwork& net, const SimConfig& cfg)
     : net_(net), cfg_(cfg), policy_(&defaultDispatchPolicy()), rng_(cfg.seed) {
     target_count_ = cfg.oht_count;
     seg_occupancy_.assign(net_.segments().size(), 0);
+    seg_owner_.assign(net_.segments().size(), -1);
 
     // Depots are the ring junctions (their names start with 'R'); ports feed job origins and destinations.
     for (const rail::Node& nd : net_.nodes()) {
@@ -121,29 +122,145 @@ void Simulation::setRoute(Vehicle& v, const rail::PathResult& route) {
 
 void Simulation::advanceVehicles(float dt) {
     for (Vehicle& v : vehicles_) {
-        if (!v.alive || v.state == VehState::Idle) continue;
+        v.blocked = false;
+        v.want_seg = -1;
+        if (!v.alive || v.state == VehState::Idle || v.route_segs.empty()) continue;
+
         float remaining = v.speed * dt;
         int transitions = 0;
-        // Keep spending this step's distance budget across nodes and across a pickup or dropoff, so a
-        // fast OHT never loses a substep at a boundary. Pickup to carry to done is at most two arrivals.
-        while (remaining > 0.0f && v.alive && v.state != VehState::Idle) {
-            while (remaining > 0.0f && v.leg < v.route_segs.size()) {
-                float seg_len = std::max(net_.segments()[v.route_segs[v.leg]].length, 1e-4f);
-                float dist_left = (1.0f - v.progress) * seg_len;
-                if (remaining < dist_left) {
-                    v.progress += remaining / seg_len;
-                    remaining = 0.0f;
-                } else {
-                    remaining -= dist_left;
-                    v.progress = 0.0f;
-                    ++v.leg;
-                }
+        // Spend this step's distance budget, claiming each segment before entering it. A claim is
+        // refused when the segment is taken (capacity 1) or, under avoidance, when entering it would
+        // strand someone (unsafe state); the vehicle then waits at its node holding what it has.
+        while (remaining > 0.0f && v.alive && v.state != VehState::Idle && transitions < 16) {
+            if (v.held_seg < 0) {  // waiting at a node to enter the current leg's segment
+                rail::SegmentId want = v.route_segs[v.leg];
+                if (!tryEnter(v, want)) { v.blocked = true; v.want_seg = want; break; }
+                v.held_seg = want;
+                v.progress = 0.0f;
             }
-            if (v.leg < v.route_segs.size()) break;  // budget spent mid-segment
-            onArrival(v);                            // installs the next route, goes idle, or retires
-            if (++transitions > 2) break;            // guard against a degenerate zero-length route loop
+
+            float seg_len = std::max(net_.segments()[v.held_seg].length, 1e-4f);
+            float dist_left = (1.0f - v.progress) * seg_len;
+            if (remaining < dist_left) {
+                v.progress += remaining / seg_len;
+                remaining = 0.0f;
+                break;
+            }
+            remaining -= dist_left;
+            v.progress = 1.0f;  // reached the far node of the held segment
+
+            if (v.leg + 1 >= v.route_segs.size()) {  // arrived at the route's end (pickup or dropoff)
+                releaseHeld(v);
+                onArrival(v);   // installs the carry route (held stays -1), or goes idle/retires
+                ++transitions;
+                continue;
+            }
+            rail::SegmentId next = v.route_segs[v.leg + 1];
+            if (!tryEnter(v, next)) { v.blocked = true; v.want_seg = next; break; }  // wait, still holding current
+            releaseHeld(v);
+            v.leg += 1;
+            v.held_seg = next;
+            v.progress = 0.0f;
+            ++transitions;
         }
     }
+}
+
+bool Simulation::tryEnter(Vehicle& v, rail::SegmentId seg) {
+    if (seg_owner_[seg] != -1 && seg_owner_[seg] != v.id) return false;  // capacity 1
+    if (avoidance_ && !safeToEnter(v, seg)) return false;               // refuse moves into unsafe states
+    seg_owner_[seg] = v.id;
+    return true;
+}
+
+void Simulation::releaseHeld(Vehicle& v) {
+    if (v.held_seg >= 0) {
+        seg_owner_[v.held_seg] = -1;
+        v.held_seg = -1;
+    }
+}
+
+// Banker-style safe-state test. Tentatively move `mover` onto `next`, then ask: is there an order in
+// which every in-flight vehicle can drive its whole remaining route to the end and vacate? A vehicle
+// can finish when none of its remaining segments is occupied by another unfinished vehicle; let it
+// finish, free its segment, and repeat. Idle vehicles hold nothing and are ignored. Admitting only
+// moves that keep a completion order available means the fleet never enters a deadlock.
+bool Simulation::safeToEnter(const Vehicle& mover, rail::SegmentId next) const {
+    struct M { const Vehicle* v; int remain_start; rail::SegmentId own; bool done; };
+    std::vector<M> ms;
+    ms.reserve(vehicles_.size());
+    for (const Vehicle& v : vehicles_) {
+        if (!v.alive || v.state == VehState::Idle || v.route_segs.empty()) continue;
+        int remain_start;
+        rail::SegmentId own;
+        if (&v == &mover) {  // tentative: mover releases its current segment and occupies `next`
+            remain_start = (v.held_seg >= 0) ? static_cast<int>(v.leg) + 1 : static_cast<int>(v.leg);
+            own = next;
+        } else {
+            remain_start = static_cast<int>(v.leg);
+            own = v.held_seg;  // -1 when it is waiting at a node holding nothing
+        }
+        ms.push_back({&v, remain_start, own, false});
+    }
+
+    std::vector<int> occ(seg_owner_.size(), 0);  // segments held by still-unfinished vehicles
+    for (const M& m : ms) if (m.own >= 0) ++occ[m.own];
+
+    int remaining = static_cast<int>(ms.size());
+    bool found = true;
+    int guard = 0;
+    while (found && remaining > 0 && guard++ < 100000) {
+        found = false;
+        for (M& m : ms) {
+            if (m.done) continue;
+            const std::vector<rail::SegmentId>& rs = m.v->route_segs;
+            bool clear = true;  // whole remaining route free of other vehicles' held segments
+            for (int i = m.remain_start; i < static_cast<int>(rs.size()); ++i) {
+                rail::SegmentId s = rs[i];
+                if (occ[s] > 0 && s != m.own) { clear = false; break; }
+            }
+            if (clear) {
+                if (m.own >= 0) --occ[m.own];
+                m.done = true;
+                --remaining;
+                found = true;
+            }
+        }
+    }
+    return remaining == 0;
+}
+
+int Simulation::countDeadlocked() const {
+    int n = static_cast<int>(vehicles_.size());
+    std::vector<int> nxt(n, -1);  // blocked vehicle -> owner of the segment it waits on
+    for (const Vehicle& v : vehicles_) {
+        if (v.alive && v.blocked && v.want_seg >= 0) {
+            VehicleId o = seg_owner_[v.want_seg];
+            if (o >= 0 && o != v.id) nxt[v.id] = o;
+        }
+    }
+    std::vector<int> color(n, 0);   // 0 unvisited, 1 on current walk, 2 settled
+    std::vector<char> oncycle(n, 0);
+    for (int s = 0; s < n; ++s) {
+        if (color[s] != 0 || nxt[s] < 0) continue;
+        std::vector<int> stack;
+        int u = s;
+        while (u >= 0 && color[u] == 0) {
+            color[u] = 1;
+            stack.push_back(u);
+            u = nxt[u];
+        }
+        if (u >= 0 && color[u] == 1) {  // closed a cycle at u; mark from the top of the walk back to u
+            for (int i = static_cast<int>(stack.size()) - 1; i >= 0; --i) {
+                oncycle[stack[i]] = 1;
+                if (stack[i] == u) break;
+            }
+        }
+        for (int x : stack) color[x] = 2;
+    }
+    int cnt = 0;
+    for (int i = 0; i < n; ++i) if (oncycle[i]) ++cnt;
+    return cnt;
 }
 
 void Simulation::onArrival(Vehicle& v) {
@@ -223,9 +340,7 @@ void Simulation::reconcileFleet() {
 void Simulation::recomputeOccupancy() {
     std::fill(seg_occupancy_.begin(), seg_occupancy_.end(), 0);
     for (const Vehicle& v : vehicles_) {
-        if (v.alive && v.state != VehState::Idle && v.leg < v.route_segs.size()) {
-            ++seg_occupancy_[v.route_segs[v.leg]];
-        }
+        if (v.alive && v.held_seg >= 0) ++seg_occupancy_[v.held_seg];
     }
 }
 
@@ -252,6 +367,10 @@ SimStats Simulation::stats() const {
     s.jobs_pending = n_pending_;
     s.jobs_active = n_active_;
     s.jobs_done = n_done_;
+    for (const Vehicle& v : vehicles_) {
+        if (v.alive && v.blocked) ++s.vehicles_blocked;
+    }
+    s.vehicles_deadlocked = countDeadlocked();
     s.throughput_per_min = static_cast<float>(recent_complete_.size());  // window is 60 s, so count is per minute
     s.utilization = s.vehicles_live > 0 ? static_cast<float>(s.vehicles_busy) / s.vehicles_live : 0.0f;
     s.empty_travel = empty_dist_;

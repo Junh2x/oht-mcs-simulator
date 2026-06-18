@@ -55,12 +55,56 @@ static void runDispatchBench(const rail::RailNetwork& net,
     }
 }
 
+// Headless proof of the deadlock toggle: same high-contention scenario, avoidance OFF then ON.
+// OFF is expected to deadlock (vehicles trapped in a wait-for cycle); ON must never deadlock.
+static void runDeadlockCheck(const rail::RailNetwork& net) {
+    const unsigned seeds[] = {1, 2, 3, 4, 5};
+    const int nseeds = static_cast<int>(sizeof(seeds) / sizeof(seeds[0]));
+    const int kSteps = 6000;
+    sim::SimConfig base;
+    base.oht_count = 10;
+    base.arrival_per_sec = 1.5f;
+
+    std::printf("\ndeadlock check: %d OHT, %.1f job/s, %d steps x %d seeds (high contention)\n",
+                base.oht_count, base.arrival_per_sec, kSteps, nseeds);
+    std::printf("%-4s %-22s %16s %10s %9s\n", "mode", "verdict", "seedsDeadlocked", "done", "maxDead");
+    for (int avoid = 0; avoid <= 1; ++avoid) {
+        long total_done = 0;
+        int worst_dead = 0;
+        int seeds_dead = 0;
+        for (int si = 0; si < nseeds; ++si) {
+            sim::SimConfig cfg = base;
+            cfg.seed = seeds[si];
+            sim::Simulation s(net, cfg);
+            s.setAvoidance(avoid != 0);
+            int maxdead = 0;
+            for (int k = 0; k < kSteps; ++k) {
+                s.step(0.05f);
+                int d = s.stats().vehicles_deadlocked;
+                if (d > maxdead) maxdead = d;
+            }
+            sim::SimStats fin = s.stats();
+            total_done += fin.jobs_done;
+            if (maxdead > worst_dead) worst_dead = maxdead;
+            if (fin.vehicles_deadlocked > 0) ++seeds_dead;  // ended stuck in a wait-for cycle
+        }
+        const char* mode = avoid ? "ON" : "OFF";
+        const char* verdict = avoid ? (worst_dead == 0 ? "deadlock-free (PASS)" : "FAIL: deadlock under ON")
+                                    : (seeds_dead > 0 ? "deadlocks (expected)" : "no deadlock seen");
+        char seedstr[16];
+        std::snprintf(seedstr, sizeof(seedstr), "%d/%d", seeds_dead, nseeds);
+        std::printf("%-4s %-22s %16s %10ld %9d\n", mode, verdict, seedstr, total_done, worst_dead);
+    }
+}
+
 int main(int argc, char** argv) {
     bool selftest = false;
     bool bench = false;
+    bool deadlock = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--selftest") == 0) selftest = true;
         else if (std::strcmp(argv[i], "--bench") == 0) bench = true;
+        else if (std::strcmp(argv[i], "--deadlock") == 0) deadlock = true;
     }
 
     // Build the synthetic fab once; the headless modes and the live window all share it.
@@ -86,6 +130,10 @@ int main(int argc, char** argv) {
 
     if (bench) {
         runDispatchBench(net, policies, 3);
+        return 0;
+    }
+    if (deadlock) {
+        runDeadlockCheck(net);
         return 0;
     }
 
@@ -152,6 +200,7 @@ int main(int argc, char** argv) {
     int policy_sel = 1;  // start on nearest vehicle
     simulation.setPolicy(policies[policy_sel]);
     const char* policy_names[3] = {policies[0]->name(), policies[1]->name(), policies[2]->name()};
+    bool ui_avoid = simulation.avoidance();
     int ui_oht_count = sim_cfg.oht_count;
     float ui_arrival = sim_cfg.arrival_per_sec;
     float sim_speed = 4.0f;
@@ -215,6 +264,9 @@ int main(int argc, char** argv) {
         if (ImGui::SliderFloat("Job arrival /s", &ui_arrival, 0.05f, 3.0f, "%.2f")) simulation.setArrivalRate(ui_arrival);
         ImGui::SliderFloat("Sim speed x", &sim_speed, 0.0f, 20.0f, "%.1f");
         if (ImGui::Combo("Dispatch policy", &policy_sel, policy_names, 3)) simulation.setPolicy(policies[policy_sel]);
+        if (ImGui::Checkbox("Deadlock avoidance", &ui_avoid)) simulation.setAvoidance(ui_avoid);
+        ImGui::SameLine();
+        ImGui::TextDisabled(ui_avoid ? "(ON: safe-state gate)" : "(OFF: greedy, may deadlock)");
         ImGui::Separator();
         ImGui::Text("OHT live %d / target %d   (busy %d, retiring %d)",
                     st.vehicles_live, st.vehicles_target, st.vehicles_busy, st.vehicles_retiring);
@@ -222,6 +274,9 @@ int main(int argc, char** argv) {
         ImGui::Text("Throughput %.1f /min      Utilization %.0f%%", st.throughput_per_min, st.utilization * 100.0f);
         ImGui::Text("Cycle time avg %.1f, p95 %.1f (create to done)", st.avg_delivery, st.p95_delivery);
         ImGui::Text("Empty travel %.0f%% (deadhead share)", st.empty_ratio * 100.0f);
+        ImVec4 dead_col = st.vehicles_deadlocked > 0 ? ImVec4(0.95f, 0.35f, 0.30f, 1.0f)
+                                                     : ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
+        ImGui::TextColored(dead_col, "Waiting %d, deadlocked %d", st.vehicles_blocked, st.vehicles_deadlocked);
         if (tput_count > 0 && ImPlot::BeginPlot("Throughput", ImVec2(-1, 160))) {
             int offset = (tput_count == kPlotCap) ? tput_head : 0;
             ImPlot::SetupAxes("sim time (s)", "jobs/min");

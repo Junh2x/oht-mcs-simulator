@@ -41,6 +41,9 @@ struct Vehicle {
     std::size_t leg = 0;            // index of the current segment within route_segs
     float progress = 0.0f;          // [0,1] along the current segment
     float speed = 0.0f;
+    rail::SegmentId held_seg = -1;  // segment currently occupied (reserved), -1 if sitting at a node
+    bool blocked = false;           // could not enter its next segment this step (waiting at a node)
+    rail::SegmentId want_seg = -1;  // segment it is waiting to enter while blocked
 };
 
 struct SimConfig {
@@ -66,6 +69,8 @@ struct SimStats {
     float empty_travel = 0.0f;       // cumulative empty (to-pickup) distance driven
     float loaded_travel = 0.0f;      // cumulative loaded (to-dest) distance driven
     float empty_ratio = 0.0f;        // empty / (empty + loaded): the deadhead share dispatching controls
+    int vehicles_blocked = 0;        // waiting at a node for a segment this step
+    int vehicles_deadlocked = 0;     // in a wait-for cycle (stays zero under avoidance)
 };
 
 class Simulation {
@@ -76,6 +81,8 @@ public:
     void setTargetOhtCount(int n);
     void setArrivalRate(float per_sec);
     void setPolicy(const DispatchPolicy* p) { policy_ = p; }  // swap the dispatching strategy live
+    void setAvoidance(bool on) { avoidance_ = on; }           // ON = deadlock-avoidance gate, OFF = greedy
+    bool avoidance() const { return avoidance_; }
 
     const std::vector<Vehicle>& vehicles() const { return vehicles_; }
     rail::Vec2 vehicleWorldPos(const Vehicle& v) const;
@@ -87,6 +94,10 @@ private:
     void generateJobs(float dt);
     void assignJobs();
     void advanceVehicles(float dt);
+    bool tryEnter(Vehicle& v, rail::SegmentId seg);                    // capacity-1 claim, plus safe gate when ON
+    bool safeToEnter(const Vehicle& mover, rail::SegmentId next) const;  // banker-style safe-state check
+    void releaseHeld(Vehicle& v);
+    int countDeadlocked() const;                                       // vehicles trapped in a wait-for cycle
     void onArrival(Vehicle& v);
     void reconcileFleet();
     void recomputeOccupancy();
@@ -108,7 +119,9 @@ private:
     std::vector<Vehicle> vehicles_;       // never erased; dead vehicles keep alive=false so id stays the index
     std::vector<Job> jobs_;               // id is the index; grows over the run (bounded batch runs are fine)
     std::deque<JobId> pending_;           // FIFO queue of unassigned jobs
-    std::vector<int> seg_occupancy_;      // indexed by SegmentId, recomputed each step
+    std::vector<int> seg_occupancy_;      // indexed by SegmentId, recomputed each step (render/cost)
+    std::vector<VehicleId> seg_owner_;    // segment -> owning vehicle id, -1 if free (capacity 1)
+    bool avoidance_ = true;               // ON = safe-state admission gate; OFF = greedy (can deadlock)
 
     std::vector<rail::NodeId> depots_;    // ring junctions where vehicles spawn
     std::vector<rail::NodeId> ports_;     // candidate job origins and destinations
