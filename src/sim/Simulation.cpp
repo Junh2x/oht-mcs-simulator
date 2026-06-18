@@ -19,6 +19,7 @@ Simulation::Simulation(const rail::RailNetwork& net, const SimConfig& cfg)
     target_count_ = cfg.oht_count;
     seg_occupancy_.assign(net_.segments().size(), 0);
     seg_owner_.assign(net_.segments().size(), -1);
+    seg_congestion_.assign(net_.segments().size(), 0.0f);
 
     // Depots are the ring junctions (their names start with 'R'); ports feed job origins and destinations.
     for (const rail::Node& nd : net_.nodes()) {
@@ -50,6 +51,14 @@ void Simulation::step(float dt) {
     advanceVehicles(dt);
     reconcileFleet();
     recomputeOccupancy();
+
+    // Smooth each segment's occupancy into a [0,1] congestion estimate for the heatmap (and STEP 7).
+    const float kCongAlpha = 0.02f;
+    for (std::size_t s = 0; s < seg_congestion_.size(); ++s) {
+        float occ = seg_occupancy_[s] > 0 ? 1.0f : 0.0f;
+        seg_congestion_[s] += kCongAlpha * (occ - seg_congestion_[s]);
+    }
+
     clock_ += dt;
     while (!recent_complete_.empty() && recent_complete_.front() < clock_ - kThroughputWindowSec) {
         recent_complete_.pop_front();

@@ -204,6 +204,8 @@ int main(int argc, char** argv) {
     int ui_oht_count = sim_cfg.oht_count;
     float ui_arrival = sim_cfg.arrival_per_sec;
     float sim_speed = 4.0f;
+    bool paused = false;
+    bool do_step = false;  // advance exactly one fixed step while paused
 
     const float kFixedDt = 0.05f;
     float sim_accum = 0.0f;
@@ -234,24 +236,32 @@ int main(int argc, char** argv) {
         glfwPollEvents();
 
         // Advance the sim in fixed steps; clamp substeps so a slow frame cannot spiral.
+        // Paused freezes time; Step advances exactly one fixed step for frame-by-frame inspection.
         float frame_dt = io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f);
-        sim_accum += frame_dt * sim_speed;
-        int substeps = 0;
-        while (sim_accum >= kFixedDt && substeps < 5) {
-            simulation.step(kFixedDt);
-            sim_accum -= kFixedDt;
-            ++substeps;
+        if (paused) {
+            sim_accum = 0.0f;
+            if (do_step) { simulation.step(kFixedDt); do_step = false; }
+        } else {
+            sim_accum += frame_dt * sim_speed;
+            int substeps = 0;
+            while (sim_accum >= kFixedDt && substeps < 5) {
+                simulation.step(kFixedDt);
+                sim_accum -= kFixedDt;
+                ++substeps;
+            }
+            if (substeps == 5) sim_accum = 0.0f;
         }
-        if (substeps == 5) sim_accum = 0.0f;
 
         sim::SimStats st = simulation.stats();
-        plot_timer += frame_dt * sim_speed;
-        if (plot_timer >= 0.5f) {
-            plot_timer = 0.0f;
-            tput_time[tput_head] = st.sim_time;
-            tput_value[tput_head] = st.throughput_per_min;
-            tput_head = (tput_head + 1) % kPlotCap;
-            if (tput_count < kPlotCap) ++tput_count;
+        if (!paused) {
+            plot_timer += frame_dt * sim_speed;
+            if (plot_timer >= 0.5f) {
+                plot_timer = 0.0f;
+                tput_time[tput_head] = st.sim_time;
+                tput_value[tput_head] = st.throughput_per_min;
+                tput_head = (tput_head + 1) % kPlotCap;
+                if (tput_count < kPlotCap) ++tput_count;
+            }
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -263,6 +273,10 @@ int main(int argc, char** argv) {
         if (ImGui::SliderInt("OHT count", &ui_oht_count, 1, 60)) simulation.setTargetOhtCount(ui_oht_count);
         if (ImGui::SliderFloat("Job arrival /s", &ui_arrival, 0.05f, 3.0f, "%.2f")) simulation.setArrivalRate(ui_arrival);
         ImGui::SliderFloat("Sim speed x", &sim_speed, 0.0f, 20.0f, "%.1f");
+        if (ImGui::Button(paused ? "Resume" : "Pause")) paused = !paused;
+        ImGui::SameLine();
+        if (ImGui::Button("Step")) { paused = true; do_step = true; }
+        if (paused) { ImGui::SameLine(); ImGui::TextDisabled("(paused)"); }
         if (ImGui::Combo("Dispatch policy", &policy_sel, policy_names, 3)) simulation.setPolicy(policies[policy_sel]);
         if (ImGui::Checkbox("Deadlock avoidance", &ui_avoid)) simulation.setAvoidance(ui_avoid);
         ImGui::SameLine();
@@ -285,6 +299,7 @@ int main(int argc, char** argv) {
         }
         ImGui::TextColored(ImVec4(0.55f, 0.78f, 0.98f, 1.0f),
                            "Cyan = empty OHT, yellow = carrying, grey = idle.");
+        ImGui::TextDisabled("Rail color = live congestion (grey idle -> orange -> red busy).");
         ImGui::End();
 
         ImGui::Begin("Rail Network");
@@ -294,7 +309,7 @@ int main(int argc, char** argv) {
         if (canvas_size.y < 50.0f) canvas_size.y = 50.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         render::RailView view = render::makeRailView(canvas_origin, canvas_size, net, rail_style.pad);
-        render::drawRailNetwork(dl, view, net, path, rail_style);
+        render::drawRailNetwork(dl, view, net, path, rail_style, &simulation.segmentCongestion());
 
         // Bridge the sim to the renderer here so neither core depends on the other.
         std::vector<render::VehicleMarker> markers;

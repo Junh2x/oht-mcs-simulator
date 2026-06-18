@@ -87,6 +87,7 @@ public:
     const std::vector<Vehicle>& vehicles() const { return vehicles_; }
     rail::Vec2 vehicleWorldPos(const Vehicle& v) const;
     float segmentLoad(rail::SegmentId s) const { return static_cast<float>(seg_occupancy_[s]); }  // STEP 7 hook
+    const std::vector<float>& segmentCongestion() const { return seg_congestion_; }  // occupancy EMA, for the heatmap
     int pendingCount() const { return static_cast<int>(pending_.size()); }  // queue size, for accounting checks
     SimStats stats() const;
 
@@ -121,6 +122,7 @@ private:
     std::deque<JobId> pending_;           // FIFO queue of unassigned jobs
     std::vector<int> seg_occupancy_;      // indexed by SegmentId, recomputed each step (render/cost)
     std::vector<VehicleId> seg_owner_;    // segment -> owning vehicle id, -1 if free (capacity 1)
+    std::vector<float> seg_congestion_;   // per-segment occupancy EMA in [0,1] for the live heatmap
     bool avoidance_ = true;               // ON = safe-state admission gate; OFF = greedy (can deadlock)
 
     std::vector<rail::NodeId> depots_;    // ring junctions where vehicles spawn

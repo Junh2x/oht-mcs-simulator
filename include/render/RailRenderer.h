@@ -4,6 +4,8 @@
 #include "rail/RailNetwork.h"
 #include "render/RailView.h"
 
+#include <vector>
+
 namespace render {
 
 struct RailViewStyle {
@@ -16,9 +18,11 @@ struct RailViewStyle {
 };
 
 // Draws the rail network with the given shared view. The rail core stays renderer-free; only this
-// render layer knows about ImGui.
+// render layer knows about ImGui. When `congestion` is given (one value per segment in [0,1]), each
+// segment's core line is colored and thickened by its load to form a live heatmap.
 void drawRailNetwork(ImDrawList* dl, const RailView& view,
                      const rail::RailNetwork& net, const rail::PathResult& path,
-                     const RailViewStyle& style = {});
+                     const RailViewStyle& style = {},
+                     const std::vector<float>* congestion = nullptr);
 
 }  // namespace render
