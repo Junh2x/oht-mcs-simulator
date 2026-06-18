@@ -21,12 +21,12 @@ Simulation::Simulation(const rail::RailNetwork& net, const SimConfig& cfg)
     seg_owner_.assign(net_.segments().size(), -1);
     seg_congestion_.assign(net_.segments().size(), 0.0f);
 
-    // Depots are the ring junctions (their names start with 'R'); ports feed job origins and destinations.
+    // Ports feed job origins and destinations; every other (junction) node can host a spawned vehicle.
     for (const rail::Node& nd : net_.nodes()) {
         if (nd.is_port) ports_.push_back(nd.id);
-        else if (!nd.name.empty() && nd.name.front() == 'R') depots_.push_back(nd.id);
+        else depots_.push_back(nd.id);
     }
-    assert(!depots_.empty() && "Simulation needs at least one ring junction to spawn vehicles");
+    assert(!depots_.empty() && "Simulation needs at least one junction to spawn vehicles");
 
     for (int i = 0; i < cfg.oht_count; ++i) spawnVehicle();
 }

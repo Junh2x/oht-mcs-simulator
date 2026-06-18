@@ -1,80 +1,71 @@
 #include "rail/FabTopology.h"
 
-#include <cmath>
-#include <cstdio>
 #include <string>
-#include <vector>
 
 namespace rail {
 
-// Deterministic synthetic fab: a 12-bay interbay ring (the long way around), each bay an intrabay
-// port loop (no dead-end stubs, so OHTs circulate), and three cross-ring chords (shortcuts and the
-// contention points). The bay-0 to bay-6 shortest path crosses a chord, the verified bottleneck.
+// Deterministic synthetic fab in the rectilinear style of a real 300mm wafer fab: a central interbay
+// highway (a racetrack of two parallel rails joined at the ends, with a couple of cross-links) and
+// intrabay bays hanging off it as ribs, above and below. Each bay is a small rectangular loop with
+// four ports. OHTs cross the fab along the highway and dip into a bay only to serve its ports, which
+// matches how interbay and intrabay transport are physically separated.
 RailNetwork buildSyntheticFab(FabDemo& demo) {
     RailNetwork net;
 
-    const Vec2 center{600.0f, 450.0f};
-    const int kBays = 12;             // interbay ring junctions, one bay each
-    const float ring_r = 360.0f;      // interbay loop radius
-    const float bay_offset = 80.0f;   // entry node sits this far outside the ring
-    const float port_near = 45.0f;    // intrabay port-loop near/far radial offsets beyond the entry
-    const float port_far = 130.0f;
-    const float port_half = 55.0f;    // tangential half-width of the port loop
-    const float kPi = 3.14159265358979323846f;
+    constexpr int COLS = 6;
+    const float ox = 110.0f, col_w = 200.0f;
+    const float top_y = 360.0f, bot_y = 560.0f;   // the two interbay rails
+    const float spur = 55.0f, bay_half = 70.0f, bay_h = 80.0f, bay_gap = 22.0f;
 
-    // Interbay ring junctions (also the depots / spawn points; their names start with 'R').
-    std::vector<NodeId> ring(kBays);
-    for (int k = 0; k < kBays; ++k) {
-        float ang = 2.0f * kPi * static_cast<float>(k) / static_cast<float>(kBays);
-        Vec2 p{center.x + ring_r * std::cos(ang), center.y + ring_r * std::sin(ang)};
-        ring[k] = net.addNode(p, false, "R" + std::to_string(k));
+    // Interbay highway: two horizontal rails of COLS+1 junctions, joined into a racetrack at both ends.
+    NodeId HT[COLS + 1], HB[COLS + 1];
+    for (int i = 0; i <= COLS; ++i) {
+        HT[i] = net.addNode({ox + i * col_w, top_y}, false, "HT" + std::to_string(i));
+        HB[i] = net.addNode({ox + i * col_w, bot_y}, false, "HB" + std::to_string(i));
     }
-    for (int k = 0; k < kBays; ++k) net.addSegment(ring[k], ring[(k + 1) % kBays]);
+    for (int i = 0; i < COLS; ++i) {
+        net.addSegment(HT[i], HT[i + 1]);
+        net.addSegment(HB[i], HB[i + 1]);
+    }
+    net.addSegment(HT[0], HB[0]);          // left and right end connectors close the racetrack
+    net.addSegment(HT[COLS], HB[COLS]);
+    net.addSegment(HT[2], HB[2]);          // internal cross-links: grid connectivity and contention
+    net.addSegment(HT[4], HB[4]);
 
-    // Each bay: an entry node plus a small intrabay loop of four ports E -> P0 -> P1 -> P2 -> P3 -> E.
-    std::vector<NodeId> first_port(kBays);
-    for (int k = 0; k < kBays; ++k) {
-        float ang = 2.0f * kPi * static_cast<float>(k) / static_cast<float>(kBays);
-        Vec2 outward{std::cos(ang), std::sin(ang)};
-        Vec2 tangent{-std::sin(ang), std::cos(ang)};
-        Vec2 epos{center.x + (ring_r + bay_offset) * outward.x,
-                  center.y + (ring_r + bay_offset) * outward.y};
-        NodeId entry = net.addNode(epos, false, "E" + std::to_string(k));
-        net.addSegment(ring[k], entry);
-
-        auto portPos = [&](float radial, float tang) {
-            return Vec2{epos.x + radial * outward.x + tang * tangent.x,
-                        epos.y + radial * outward.y + tang * tangent.y};
-        };
-        NodeId p0 = net.addNode(portPos(port_near, -port_half), true, "P" + std::to_string(k) + "_0");
-        NodeId p1 = net.addNode(portPos(port_far, -port_half), true, "P" + std::to_string(k) + "_1");
-        NodeId p2 = net.addNode(portPos(port_far, port_half), true, "P" + std::to_string(k) + "_2");
-        NodeId p3 = net.addNode(portPos(port_near, port_half), true, "P" + std::to_string(k) + "_3");
-        net.addSegment(entry, p0);
+    // A bay is a rectangular loop on a spur off a highway junction. out_dir = -1 hangs it above the
+    // top rail, +1 below the bottom rail. Returns the bay's first port.
+    auto build_bay = [&](NodeId hub, float cx, float hub_y, float out_dir, const std::string& tag) {
+        float ey = hub_y + out_dir * spur;
+        NodeId e = net.addNode({cx, ey}, false, "E" + tag);
+        net.addSegment(hub, e);
+        float y0 = ey + out_dir * bay_gap;
+        float y1 = ey + out_dir * (bay_gap + bay_h);
+        NodeId p0 = net.addNode({cx - bay_half, y0}, true, "P" + tag + "_0");
+        NodeId p1 = net.addNode({cx - bay_half, y1}, true, "P" + tag + "_1");
+        NodeId p2 = net.addNode({cx + bay_half, y1}, true, "P" + tag + "_2");
+        NodeId p3 = net.addNode({cx + bay_half, y0}, true, "P" + tag + "_3");
+        net.addSegment(e, p0);
         net.addSegment(p0, p1);
         net.addSegment(p1, p2);
         net.addSegment(p2, p3);
-        net.addSegment(p3, entry);
-        first_port[k] = p0;
+        net.addSegment(p3, e);
+        return p0;
+    };
+
+    NodeId top_first[COLS], bot_first[COLS];
+    for (int c = 0; c < COLS; ++c) {
+        float cx = ox + c * col_w;
+        top_first[c] = build_bay(HT[c], cx, top_y, -1.0f, "T" + std::to_string(c));
+        bot_first[c] = build_bay(HB[c], cx, bot_y, +1.0f, "B" + std::to_string(c));
     }
 
-    // Cross-ring chords: shortcuts between opposite junctions, the bottleneck contention points.
-    const int opp = kBays / 2;
-    SegmentId demo_chord = net.addSegment(ring[0], ring[opp], true, true);
-    net.addSegment(ring[2], ring[(2 + opp) % kBays], true, true);
-    net.addSegment(ring[4], ring[(4 + opp) % kBays], true, true);
-
-    // Verify the bottleneck-prefers-chord invariant rather than assuming it: the chord must beat the
-    // shorter ring detour between the same two junctions (both half-rings are equal for an even ring).
-    float detour = 0.0f;
-    for (int k = 0; k < opp; ++k) detour += net.distanceBetween(ring[k], ring[k + 1]);
-    if (!(net.segments()[demo_chord].length < detour)) {
-        std::fprintf(stderr, "warning: demo chord (%.1f) is not shorter than the ring detour (%.1f)\n",
-                     net.segments()[demo_chord].length, detour);
-    }
-
-    demo.start = first_port[0];
-    demo.goal = first_port[opp];
+    // Demo query: a port in the top-left bay to a port in the bottom-right bay, crossing the highway.
+    demo.start = top_first[0];
+    demo.goal = bot_first[COLS - 1];
+    // Hot lane crosses the highway through the single HT2-HB2 cross-link, so detouring via the ends
+    // or the other cross-link is the congestion-aware alternative.
+    demo.hot_a = top_first[2];
+    demo.hot_b = bot_first[2];
     return net;
 }
 

@@ -211,10 +211,10 @@ static void runRouteBench(const rail::RailNetwork& net, const rail::FabDemo& dem
     const float measure_min = kMeasure * dt / 60.0f;
     sim::SimConfig base;
     base.oht_count = 14;
-    base.arrival_per_sec = 0.3f;   // concentrated demand congests the bottleneck lane
-    base.hot_fraction = 0.6f;      // 60% of jobs run the bay-0 to bay-6 lane across the chord
-    base.hot_origin = demo.start;
-    base.hot_dest = demo.goal;
+    base.arrival_per_sec = 0.3f;   // concentrated demand congests the bottleneck cross-link
+    base.hot_fraction = 0.6f;      // 60% of jobs run the hot lane through the single cross-link
+    base.hot_origin = demo.hot_a;
+    base.hot_dest = demo.hot_b;
 
     std::printf("\nrouting benchmark: %d OHT, %.2f job/s (%.0f%% hot lane), %d seeds, lambda sweep (w = len*(1+lambda*cong))\n",
                 base.oht_count, base.arrival_per_sec, base.hot_fraction * 100.0f, nseeds);
@@ -404,6 +404,41 @@ static RouteSeries loadRoute(const char* path) {
     return s;
 }
 
+// A calm, flat "control room" theme so the console reads as professional software, not a demo.
+static void applyConsoleStyle(float scale) {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding = 4.0f;
+    s.ChildRounding = 4.0f;
+    s.FrameRounding = 3.0f;
+    s.GrabRounding = 3.0f;
+    s.ScrollbarRounding = 3.0f;
+    s.TabRounding = 3.0f;
+    s.WindowBorderSize = 1.0f;
+    s.WindowPadding = ImVec2(12, 10);
+    s.FramePadding = ImVec2(8, 5);
+    s.ItemSpacing = ImVec2(8, 8);
+    s.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]         = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
+    c[ImGuiCol_TitleBg]          = ImVec4(0.12f, 0.14f, 0.17f, 1.00f);
+    c[ImGuiCol_TitleBgActive]    = ImVec4(0.16f, 0.21f, 0.29f, 1.00f);
+    c[ImGuiCol_FrameBg]          = ImVec4(0.16f, 0.18f, 0.21f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]   = ImVec4(0.22f, 0.25f, 0.31f, 1.00f);
+    c[ImGuiCol_FrameBgActive]    = ImVec4(0.26f, 0.31f, 0.39f, 1.00f);
+    c[ImGuiCol_Button]           = ImVec4(0.20f, 0.27f, 0.36f, 1.00f);
+    c[ImGuiCol_ButtonHovered]    = ImVec4(0.27f, 0.36f, 0.48f, 1.00f);
+    c[ImGuiCol_ButtonActive]     = ImVec4(0.32f, 0.43f, 0.58f, 1.00f);
+    c[ImGuiCol_Header]           = ImVec4(0.20f, 0.27f, 0.36f, 1.00f);
+    c[ImGuiCol_HeaderHovered]    = ImVec4(0.27f, 0.36f, 0.48f, 1.00f);
+    c[ImGuiCol_SliderGrab]       = ImVec4(0.38f, 0.58f, 0.82f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.48f, 0.68f, 0.92f, 1.00f);
+    c[ImGuiCol_CheckMark]        = ImVec4(0.48f, 0.72f, 0.96f, 1.00f);
+    c[ImGuiCol_Separator]        = ImVec4(0.24f, 0.27f, 0.33f, 1.00f);
+    c[ImGuiCol_Border]           = ImVec4(0.22f, 0.25f, 0.31f, 1.00f);
+    s.ScaleAllSizes(scale);
+}
+
 int main(int argc, char** argv) {
     bool selftest = false;
     bool bench = false;
@@ -481,7 +516,7 @@ int main(int argc, char** argv) {
     }
 
     GLFWwindow* window = glfwCreateWindow(
-        static_cast<int>(1280 * ui_scale), static_cast<int>(760 * ui_scale),
+        static_cast<int>(1480 * ui_scale), static_cast<int>(840 * ui_scale),
         "OHT-MCS Simulator",
         nullptr, nullptr);
     if (window == nullptr) {
@@ -503,8 +538,7 @@ int main(int argc, char** argv) {
     font_cfg.SizePixels = 13.0f * ui_scale;
     io.Fonts->AddFontDefault(&font_cfg);
 
-    ImGui::StyleColorsDark();
-    ImGui::GetStyle().ScaleAllSizes(ui_scale);
+    applyConsoleStyle(ui_scale);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -540,6 +574,7 @@ int main(int argc, char** argv) {
     const int kPlotCap = 400;  // fixed-size scrolling window for the throughput plot
     std::vector<float> tput_time(kPlotCap, 0.0f);
     std::vector<float> tput_value(kPlotCap, 0.0f);
+    std::vector<float> util_value(kPlotCap, 0.0f);
     int tput_count = 0;
     int tput_head = 0;
 
@@ -589,6 +624,7 @@ int main(int argc, char** argv) {
                 plot_timer = 0.0f;
                 tput_time[tput_head] = st.sim_time;
                 tput_value[tput_head] = st.throughput_per_min;
+                util_value[tput_head] = st.utilization * 100.0f;
                 tput_head = (tput_head + 1) % kPlotCap;
                 if (tput_count < kPlotCap) ++tput_count;
             }
@@ -598,43 +634,64 @@ int main(int argc, char** argv) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::Begin("Simulation");
-        ImGui::Text("%.1f FPS   sim time %.0f s", io.Framerate, st.sim_time);
+        ImVec2 disp = io.DisplaySize;
+        float lw = 400.0f * ui_scale;
+        float rw = 440.0f * ui_scale;
+        float mw = disp.x - lw - rw;
+        if (mw < 260.0f * ui_scale) mw = 260.0f * ui_scale;
+
+        ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(lw, disp.y), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Control Console");
+        ImGui::TextDisabled("OHT-MCS  |  %.0f FPS  |  sim time %.0f s", io.Framerate, st.sim_time);
+
+        ImGui::SeparatorText("Fleet & workload");
         if (ImGui::SliderInt("OHT count", &ui_oht_count, 1, 60)) simulation.setTargetOhtCount(ui_oht_count);
-        if (ImGui::SliderFloat("Job arrival /s", &ui_arrival, 0.05f, 3.0f, "%.2f")) simulation.setArrivalRate(ui_arrival);
-        ImGui::SliderFloat("Sim speed x", &sim_speed, 0.0f, 20.0f, "%.1f");
-        if (ImGui::Button(paused ? "Resume" : "Pause")) paused = !paused;
+        if (ImGui::SliderFloat("Job arrival (/s)", &ui_arrival, 0.05f, 3.0f, "%.2f")) simulation.setArrivalRate(ui_arrival);
+
+        ImGui::SeparatorText("Playback");
+        ImGui::SliderFloat("Sim speed (x)", &sim_speed, 0.0f, 20.0f, "%.1f");
+        if (ImGui::Button(paused ? "Resume" : "Pause", ImVec2(96 * ui_scale, 0))) paused = !paused;
         ImGui::SameLine();
-        if (ImGui::Button("Step")) { paused = true; do_step = true; }
-        if (paused) { ImGui::SameLine(); ImGui::TextDisabled("(paused)"); }
-        if (ImGui::Combo("Dispatch policy", &policy_sel, policy_names, 3)) simulation.setPolicy(policies[policy_sel]);
+        if (ImGui::Button("Step", ImVec2(96 * ui_scale, 0))) { paused = true; do_step = true; }
+        if (paused) { ImGui::SameLine(); ImGui::TextDisabled("paused"); }
+
+        ImGui::SeparatorText("Control policy (MCS)");
+        if (ImGui::Combo("Dispatch", &policy_sel, policy_names, 3)) simulation.setPolicy(policies[policy_sel]);
         if (ImGui::Checkbox("Deadlock avoidance", &ui_avoid)) simulation.setAvoidance(ui_avoid);
         ImGui::SameLine();
-        ImGui::TextDisabled(ui_avoid ? "(ON: safe-state gate)" : "(OFF: greedy, may deadlock)");
-        if (ImGui::SliderFloat("Route congestion lambda", &ui_lambda, 0.0f, 8.0f, "%.1f")) simulation.setRoutingLambda(ui_lambda);
-        if (ImGui::Checkbox("Hot lane demand", &ui_hot)) simulation.setHotspot(ui_hot ? 0.5f : 0.0f, demo.start, demo.goal);
-        ImGui::Separator();
-        ImGui::Text("OHT live %d / target %d   (busy %d, retiring %d)",
-                    st.vehicles_live, st.vehicles_target, st.vehicles_busy, st.vehicles_retiring);
-        ImGui::Text("Jobs: pending %d, active %d, done %d", st.jobs_pending, st.jobs_active, st.jobs_done);
-        ImGui::Text("Throughput %.1f /min      Utilization %.0f%%", st.throughput_per_min, st.utilization * 100.0f);
-        ImGui::Text("Cycle time avg %.1f, p95 %.1f (create to done)", st.avg_delivery, st.p95_delivery);
-        ImGui::Text("Empty travel %.0f%% (deadhead share)", st.empty_ratio * 100.0f);
-        ImVec4 dead_col = st.vehicles_deadlocked > 0 ? ImVec4(0.95f, 0.35f, 0.30f, 1.0f)
+        ImGui::TextDisabled(ui_avoid ? "(safe-state gate)" : "(greedy: may deadlock)");
+        if (ImGui::SliderFloat("Routing lambda", &ui_lambda, 0.0f, 8.0f, "%.1f")) simulation.setRoutingLambda(ui_lambda);
+        if (ImGui::Checkbox("Hot lane demand", &ui_hot)) simulation.setHotspot(ui_hot ? 0.5f : 0.0f, demo.hot_a, demo.hot_b);
+
+        ImGui::SeparatorText("Live KPIs");
+        ImGui::Text("OHT: %d live / %d target   (busy %d)", st.vehicles_live, st.vehicles_target, st.vehicles_busy);
+        ImGui::Text("Jobs: %d done  |  %d in-flight  |  %d queued", st.jobs_done, st.jobs_active, st.jobs_pending);
+        ImGui::Text("Throughput: %.1f /min      Utilization: %.0f%%", st.throughput_per_min, st.utilization * 100.0f);
+        ImGui::Text("Cycle time: %.1f s avg, %.1f s p95", st.avg_delivery, st.p95_delivery);
+        ImGui::Text("Empty travel (deadhead): %.0f%%", st.empty_ratio * 100.0f);
+        ImVec4 dead_col = st.vehicles_deadlocked > 0 ? ImVec4(0.95f, 0.40f, 0.34f, 1.0f)
                                                      : ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
-        ImGui::TextColored(dead_col, "Waiting %d, deadlocked %d", st.vehicles_blocked, st.vehicles_deadlocked);
-        if (tput_count > 0 && ImPlot::BeginPlot("Throughput", ImVec2(-1, 160))) {
+        ImGui::TextColored(dead_col, "Waiting: %d      Deadlocked: %d", st.vehicles_blocked, st.vehicles_deadlocked);
+
+        if (tput_count > 0 && ImPlot::BeginPlot("Throughput & utilization", ImVec2(-1, 175 * ui_scale))) {
             int offset = (tput_count == kPlotCap) ? tput_head : 0;
-            ImPlot::SetupAxes("sim time (s)", "jobs/min");
+            ImPlot::SetupAxes("sim time (s)", "jobs / min");
+            ImPlot::SetupAxis(ImAxis_Y2, "util (%)", ImPlotAxisFlags_AuxDefault);
+            ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, 100.0, ImPlotCond_Always);
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
             ImPlot::PlotLine("throughput", tput_time.data(), tput_value.data(), tput_count, 0, offset, sizeof(float));
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+            ImPlot::PlotLine("utilization", tput_time.data(), util_value.data(), tput_count, 0, offset, sizeof(float));
             ImPlot::EndPlot();
         }
-        ImGui::TextColored(ImVec4(0.55f, 0.78f, 0.98f, 1.0f),
-                           "Cyan = empty OHT, yellow = carrying, grey = idle.");
-        ImGui::TextDisabled("Rail color = live congestion (grey idle -> orange -> red busy).");
         ImGui::End();
 
-        ImGui::Begin("Rail Network");
+        ImGui::SetNextWindowPos(ImVec2(lw, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(mw, disp.y), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Fab Map (live)");
+        ImGui::TextColored(ImVec4(0.55f, 0.78f, 0.98f, 1.0f),
+                           "OHT: cyan empty, yellow carrying, grey idle      Rail: grey idle -> orange -> red busy");
         ImVec2 canvas_origin = ImGui::GetCursorScreenPos();
         ImVec2 canvas_size = ImGui::GetContentRegionAvail();
         if (canvas_size.x < 50.0f) canvas_size.x = 50.0f;
@@ -660,8 +717,10 @@ int main(int argc, char** argv) {
         ImGui::Dummy(canvas_size);
         ImGui::End();
 
-        ImGui::Begin("Analysis (batch results)");
-        float ph = 200.0f * ui_scale;
+        ImGui::SetNextWindowPos(ImVec2(lw + mw, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(rw, disp.y), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Analysis (batch experiments)");
+        float ph = 190.0f * ui_scale;
         if (sweep_series.empty() && route_series.lambda.empty()) {
             ImGui::TextWrapped("No batch data. Run --sweep and/or --route to write data/*.csv, then restart.");
         } else {

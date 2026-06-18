@@ -4,10 +4,13 @@
 
 namespace rail {
 
-// The two demo ports whose shortest path must cross the bottleneck chord (STEP 1 console query).
+// Demo ports for the console shortest-path query, plus a hot-lane pair chosen so its shortest path
+// loads one interbay rail (leaving the parallel rail as the congestion-aware detour).
 struct FabDemo {
     NodeId start = -1;
     NodeId goal = -1;
+    NodeId hot_a = -1;
+    NodeId hot_b = -1;
 };
 
 // Deterministic synthetic fab: an interbay hexagon ring (the long alternate route),

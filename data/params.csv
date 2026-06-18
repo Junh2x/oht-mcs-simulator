@@ -8,5 +8,5 @@ measure_steps,4500
 seeds_per_point,8
 oht_min,2
 oht_max,40
-nodes,72
-segments,87
+nodes,74
+segments,88
