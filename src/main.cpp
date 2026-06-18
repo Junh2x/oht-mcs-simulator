@@ -514,6 +514,8 @@ int main(int argc, char** argv) {
         glfwGetMonitorContentScale(monitor, &sx, &sy);
         if (sx > 0.0f) ui_scale = sx;
     }
+    if (ui_scale < 1.0f) ui_scale = 1.0f;
+    ui_scale *= 1.35f;  // the OS content scale alone reads small on a 4K panel; boost for readability
 
     GLFWwindow* window = glfwCreateWindow(
         static_cast<int>(1480 * ui_scale), static_cast<int>(840 * ui_scale),
@@ -535,7 +537,7 @@ int main(int argc, char** argv) {
 
     // Rasterize the default font larger and scale widget metrics to the DPI.
     ImFontConfig font_cfg;
-    font_cfg.SizePixels = 13.0f * ui_scale;
+    font_cfg.SizePixels = 15.0f * ui_scale;
     io.Fonts->AddFontDefault(&font_cfg);
 
     applyConsoleStyle(ui_scale);
@@ -562,6 +564,7 @@ int main(int argc, char** argv) {
     bool ui_avoid = simulation.avoidance();
     float ui_lambda = simulation.routingLambda();
     bool ui_hot = false;
+    float ui_text_scale = 1.0f;  // live text-size knob on top of the DPI scale
     int ui_oht_count = sim_cfg.oht_count;
     float ui_arrival = sim_cfg.arrival_per_sec;
     float sim_speed = 4.0f;
@@ -643,7 +646,10 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(lw, disp.y), ImGuiCond_FirstUseEver);
         ImGui::Begin("Control Console");
+        io.FontGlobalScale = ui_text_scale;
         ImGui::TextDisabled("OHT-MCS  |  %.0f FPS  |  sim time %.0f s", io.Framerate, st.sim_time);
+        ImGui::SetNextItemWidth(140.0f * ui_scale);
+        ImGui::SliderFloat("UI scale", &ui_text_scale, 0.8f, 2.0f, "%.2f");
 
         ImGui::SeparatorText("Fleet & workload");
         if (ImGui::SliderInt("OHT count", &ui_oht_count, 1, 60)) simulation.setTargetOhtCount(ui_oht_count);
