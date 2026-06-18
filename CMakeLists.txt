@@ -49,7 +49,7 @@ add_executable(${PROJECT_NAME}
   src/rail/RailNetwork.cpp
   src/rail/FabTopology.cpp
   src/sim/Simulation.cpp
-  src/sim/AssignmentPolicy.cpp
+  src/sim/Dispatch.cpp
   src/render/RailRenderer.cpp
   src/render/VehicleRenderer.cpp
 

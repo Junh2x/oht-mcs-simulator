@@ -4,7 +4,6 @@
 
 #include <cstddef>
 #include <deque>
-#include <functional>
 #include <random>
 #include <vector>
 
@@ -12,6 +11,8 @@ namespace sim {
 
 using JobId = int;
 using VehicleId = int;
+
+class DispatchPolicy;  // STEP 3 dispatching strategy, defined in Dispatch.h
 
 enum class JobState { Pending, ToPickup, Carrying, Done };
 enum class VehState { Idle, ToPickup, Carrying };
@@ -62,10 +63,10 @@ struct SimStats {
     float utilization = 0.0f;
     float avg_delivery = 0.0f;
     float p95_delivery = 0.0f;
+    float empty_travel = 0.0f;       // cumulative empty (to-pickup) distance driven
+    float loaded_travel = 0.0f;      // cumulative loaded (to-dest) distance driven
+    float empty_ratio = 0.0f;        // empty / (empty + loaded): the deadhead share dispatching controls
 };
-
-// Picks the idle vehicle that should take a job, or -1 if none is idle (the STEP 3 dispatching seam).
-using AssignFn = std::function<VehicleId(const std::vector<Vehicle>&, const Job&, const rail::RailNetwork&)>;
 
 class Simulation {
 public:
@@ -74,7 +75,7 @@ public:
     void step(float dt);                 // advance by dt sim seconds; reads no wall clock
     void setTargetOhtCount(int n);
     void setArrivalRate(float per_sec);
-    void setAssignment(AssignFn fn) { assign_ = std::move(fn); }
+    void setPolicy(const DispatchPolicy* p) { policy_ = p; }  // swap the dispatching strategy live
 
     const std::vector<Vehicle>& vehicles() const { return vehicles_; }
     rail::Vec2 vehicleWorldPos(const Vehicle& v) const;
@@ -95,7 +96,7 @@ private:
 
     const rail::RailNetwork& net_;
     SimConfig cfg_;
-    AssignFn assign_;
+    const DispatchPolicy* policy_ = nullptr;
     std::mt19937 rng_;
 
     float clock_ = 0.0f;
@@ -115,6 +116,9 @@ private:
     int n_pending_ = 0;
     int n_active_ = 0;
     int n_done_ = 0;
+
+    float empty_dist_ = 0.0f;   // accumulated to-pickup distance (deadhead)
+    float loaded_dist_ = 0.0f;  // accumulated to-dest distance
 
     std::vector<float> recent_delivery_;  // bounded trailing window for avg and p95
     std::deque<float> recent_complete_;   // completion times inside the throughput window

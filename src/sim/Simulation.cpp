@@ -1,8 +1,9 @@
 #include "sim/Simulation.h"
-#include "sim/AssignmentPolicy.h"
+#include "sim/Dispatch.h"
 
 #include <algorithm>
 #include <cassert>
+#include <unordered_set>
 #include <utility>
 
 namespace sim {
@@ -10,10 +11,11 @@ namespace sim {
 namespace {
 constexpr float kThroughputWindowSec = 60.0f;
 constexpr std::size_t kDeliverySamples = 256;
+constexpr int kDispatchWindow = 24;  // bounded look-ahead: jobs near the front a policy may reorder
 }  // namespace
 
 Simulation::Simulation(const rail::RailNetwork& net, const SimConfig& cfg)
-    : net_(net), cfg_(cfg), assign_(&nearestIdleAssignment), rng_(cfg.seed) {
+    : net_(net), cfg_(cfg), policy_(&defaultDispatchPolicy()), rng_(cfg.seed) {
     target_count_ = cfg.oht_count;
     seg_occupancy_.assign(net_.segments().size(), 0);
 
@@ -76,26 +78,38 @@ void Simulation::generateJobs(float dt) {
 }
 
 void Simulation::assignJobs() {
-    while (!pending_.empty()) {
-        JobId jid = pending_.front();
-        VehicleId vid = assign_(vehicles_, jobs_[jid], net_);
-        if (vid < 0) break;  // no idle vehicle available this step
+    if (policy_ == nullptr || pending_.empty()) return;
 
-        Job& job = jobs_[jid];
-        Vehicle& v = vehicles_[vid];
+    // The policy chooses job->vehicle pairs; the Simulation owns the side effects (routes, queue, stats).
+    DispatchContext ctx{vehicles_, jobs_, pending_, net_, kDispatchWindow};
+    std::vector<DispatchAssignment> picks = policy_->assign(ctx);
+    if (picks.empty()) return;
+
+    std::unordered_set<JobId> removed;
+    for (const DispatchAssignment& a : picks) {
+        Job& job = jobs_[a.job];
+        Vehicle& v = vehicles_[a.vehicle];
         rail::PathResult to_pickup = rail::dijkstra(net_, v.at, job.origin);
-        pending_.pop_front();
-        --n_pending_;
-        if (!to_pickup.found) continue;  // defensive: skip an unreachable origin rather than stall a vehicle
+        removed.insert(a.job);
+        if (!to_pickup.found) continue;  // synthetic fab is connected; defensive only
 
         job.state = JobState::ToPickup;
-        job.vehicle = vid;
+        job.vehicle = a.vehicle;
         job.assigned = clock_;
-        v.job = jid;
+        v.job = a.job;
         v.state = VehState::ToPickup;
         setRoute(v, to_pickup);
+        empty_dist_ += to_pickup.distance;
         ++n_active_;
     }
+
+    // A policy may skip jobs (bounded look-ahead), so drop assigned ids while keeping queue order.
+    std::deque<JobId> rest;
+    for (JobId jid : pending_) {
+        if (removed.find(jid) == removed.end()) rest.push_back(jid);
+    }
+    pending_.swap(rest);
+    n_pending_ = static_cast<int>(pending_.size());
 }
 
 void Simulation::setRoute(Vehicle& v, const rail::PathResult& route) {
@@ -154,6 +168,7 @@ void Simulation::onArrival(Vehicle& v) {
         job.picked = clock_;
         v.state = VehState::Carrying;
         setRoute(v, to_dest);
+        loaded_dist_ += to_dest.distance;
     } else if (v.state == VehState::Carrying) {
         Job& job = jobs_[v.job];
         job.state = JobState::Done;
@@ -239,6 +254,10 @@ SimStats Simulation::stats() const {
     s.jobs_done = n_done_;
     s.throughput_per_min = static_cast<float>(recent_complete_.size());  // window is 60 s, so count is per minute
     s.utilization = s.vehicles_live > 0 ? static_cast<float>(s.vehicles_busy) / s.vehicles_live : 0.0f;
+    s.empty_travel = empty_dist_;
+    s.loaded_travel = loaded_dist_;
+    float travel = empty_dist_ + loaded_dist_;
+    s.empty_ratio = travel > 0.0f ? empty_dist_ / travel : 0.0f;
 
     if (!recent_delivery_.empty()) {
         double sum = 0.0;
