@@ -247,6 +247,54 @@ static void runRouteBench(const rail::RailNetwork& net, const rail::FabDemo& dem
     std::printf("wrote data/route.csv\n");
 }
 
+// Little's Law sanity check: on a stable (below-capacity) system in steady state, the time-averaged
+// work-in-process L should equal throughput lambda times mean sojourn time W. Close agreement is
+// evidence that the simulator's job accounting and timing are internally consistent.
+static void runLittle(const rail::RailNetwork& net) {
+    const unsigned seeds[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const int nseeds = static_cast<int>(sizeof(seeds) / sizeof(seeds[0]));
+    const int kWarmup = 3000;    // 150 s to reach steady state
+    const int kMeasure = 12000;  // 600 s of measurement
+    const float dt = 0.05f;
+    sim::SimConfig base;
+    base.oht_count = 12;
+    base.arrival_per_sec = 0.2f;  // well below capacity so the queue stays bounded (steady state)
+
+    double L = 0, lam = 0, W = 0;
+    for (int si = 0; si < nseeds; ++si) {
+        sim::SimConfig cfg = base;
+        cfg.seed = seeds[si];
+        sim::Simulation s(net, cfg);
+        for (int k = 0; k < kWarmup; ++k) s.step(dt);
+        sim::SimStats w = s.stats();
+        int done_w = w.jobs_done;
+        double cyc_w = s.cycleSum();
+        double wip_sum = 0.0;
+        for (int k = 0; k < kMeasure; ++k) {
+            s.step(dt);
+            sim::SimStats st = s.stats();
+            wip_sum += st.jobs_pending + st.jobs_active;  // jobs in the system
+        }
+        int completed = s.stats().jobs_done - done_w;
+        double Li = wip_sum / kMeasure;
+        double lami = completed / (kMeasure * dt);
+        double Wi = completed > 0 ? (s.cycleSum() - cyc_w) / completed : 0.0;
+        L += Li / nseeds;
+        lam += lami / nseeds;
+        W += Wi / nseeds;
+    }
+    double pred = lam * W;
+    double err = pred > 0 ? 100.0 * (L - pred) / pred : 0.0;
+    std::printf("\nLittle's Law check: %d OHT, %.2f job/s (stable), %d seeds, %d measured steps\n",
+                base.oht_count, base.arrival_per_sec, nseeds, kMeasure);
+    std::printf("  L  measured avg WIP       = %.3f jobs\n", L);
+    std::printf("  lambda  throughput        = %.4f /s\n", lam);
+    std::printf("  W  avg sojourn time       = %.2f s\n", W);
+    std::printf("  lambda * W  predicted L   = %.3f jobs\n", pred);
+    std::printf("  error                     = %+.1f%%  => %s\n",
+                err, (err > -5.0 && err < 5.0) ? "consistent (within 5%)" : "outside 5%, check stability");
+}
+
 // One (arrival, avoidance) curve over fleet size, aggregated across seeds with a 95% CI on throughput.
 struct SweepSeries {
     float arrival = 0.0f;
@@ -362,12 +410,14 @@ int main(int argc, char** argv) {
     bool deadlock = false;
     bool sweep = false;
     bool route = false;
+    bool little = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--selftest") == 0) selftest = true;
         else if (std::strcmp(argv[i], "--bench") == 0) bench = true;
         else if (std::strcmp(argv[i], "--deadlock") == 0) deadlock = true;
         else if (std::strcmp(argv[i], "--sweep") == 0) sweep = true;
         else if (std::strcmp(argv[i], "--route") == 0) route = true;
+        else if (std::strcmp(argv[i], "--little") == 0) little = true;
     }
 
     // Build the synthetic fab once; the headless modes and the live window all share it.
@@ -405,6 +455,10 @@ int main(int argc, char** argv) {
     }
     if (route) {
         runRouteBench(net, demo);
+        return 0;
+    }
+    if (little) {
+        runLittle(net);
         return 0;
     }
 

@@ -99,6 +99,7 @@ public:
     float segmentLoad(rail::SegmentId s) const { return static_cast<float>(seg_occupancy_[s]); }  // STEP 7 hook
     const std::vector<float>& segmentCongestion() const { return seg_congestion_; }  // occupancy EMA, for the heatmap
     int pendingCount() const { return static_cast<int>(pending_.size()); }  // queue size, for accounting checks
+    double cycleSum() const { return total_cycle_; }                        // cumulative create-to-done, for Little's Law
     SimStats stats() const;
 
 private:
@@ -150,6 +151,7 @@ private:
 
     std::vector<float> recent_delivery_;  // bounded trailing window for avg and p95
     std::deque<float> recent_complete_;   // completion times inside the throughput window
+    double total_cycle_ = 0.0;            // sum of every create-to-done time, for the Little's Law check
 };
 
 }  // namespace sim

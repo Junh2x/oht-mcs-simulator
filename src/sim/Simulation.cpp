@@ -160,7 +160,8 @@ void Simulation::advanceVehicles(float dt) {
     for (Vehicle& v : vehicles_) {
         v.blocked = false;
         v.want_seg = -1;
-        if (!v.alive || v.state == VehState::Idle || v.route_segs.empty()) continue;
+        if (!v.alive || v.state == VehState::Idle) continue;
+        if (v.route_segs.empty()) { onArrival(v); continue; }  // already at the target node: do the handoff now
 
         float remaining = v.speed * dt;
         int transitions = 0;
@@ -341,6 +342,7 @@ void Simulation::recordCompletion(float delivery) {
     recent_delivery_.push_back(delivery);
     if (recent_delivery_.size() > kDeliverySamples) recent_delivery_.erase(recent_delivery_.begin());
     recent_complete_.push_back(clock_);
+    total_cycle_ += delivery;
 }
 
 void Simulation::reconcileFleet() {
