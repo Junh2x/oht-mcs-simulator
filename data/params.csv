@@ -1,0 +1,12 @@
+key,value
+capacity_load_per_sec,5
+service_load_per_sec,0.2
+oht_speed,80
+dt_seconds,0.05
+warmup_steps,1500
+measure_steps,4500
+seeds_per_point,8
+oht_min,2
+oht_max,40
+nodes,72
+segments,87

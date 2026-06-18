@@ -41,7 +41,10 @@ void Simulation::spawnVehicle() {
     vehicles_.push_back(std::move(v));
 }
 
-void Simulation::setTargetOhtCount(int n) { target_count_ = n < 0 ? 0 : n; }
+void Simulation::setTargetOhtCount(int n) {
+    target_count_ = n < 0 ? 0 : n;
+    reconcileFleet();  // apply right away so the slider responds even while paused or at zero speed
+}
 
 void Simulation::setArrivalRate(float per_sec) { cfg_.arrival_per_sec = per_sec < 0.0f ? 0.0f : per_sec; }
 

@@ -16,8 +16,12 @@
 
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -97,14 +101,183 @@ static void runDeadlockCheck(const rail::RailNetwork& net) {
     }
 }
 
+// Batch experiment: two regimes over the same fleet sweep, seeds for confidence intervals.
+//  - capacity/deadlock (oversaturated): throughput is the achievable capacity; ON saturates, OFF
+//    deadlocks as the fleet grows.
+//  - service/sizing (moderate demand, ON): throughput meets demand at some fleet, beyond which extra
+//    OHTs only drop utilization, which locates the right fleet size.
+static void runSweep(const rail::RailNetwork& net) {
+    namespace fs = std::filesystem;
+    fs::create_directories("data");
+
+    const float kSpeed = 80.0f;
+    const float kDt = 0.05f;
+    const int kWarmup = 1500;      // steps to reach steady state before measuring
+    const int kMeasure = 4500;     // measured steps (225 sim seconds)
+    const float measure_min = kMeasure * kDt / 60.0f;
+    const unsigned seeds[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const int nseeds = static_cast<int>(sizeof(seeds) / sizeof(seeds[0]));
+    const int ohts[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40};
+    const int noht = static_cast<int>(sizeof(ohts) / sizeof(ohts[0]));
+
+    const float kCapacityLoad = 5.0f;  // oversaturated
+    const float kServiceLoad = 0.2f;   // moderate demand, well below capacity
+    struct Pass { float arrival; int avoid; };
+    const Pass passes[] = {{kCapacityLoad, 1}, {kCapacityLoad, 0}, {kServiceLoad, 1}};
+    const int npass = static_cast<int>(sizeof(passes) / sizeof(passes[0]));
+
+    std::ofstream out("data/results.csv");
+    out << "arrival,avoidance,oht_count,seed,throughput_per_min,utilization,cycle_avg,cycle_p95,empty_ratio,max_deadlocked,jobs_done\n";
+
+    std::printf("\nsweep: %d fleet points x %d seeds x %d passes, warmup %d + measure %d steps\n",
+                noht, nseeds, npass, kWarmup, kMeasure);
+
+    std::vector<std::vector<double>> mean_tput(npass, std::vector<double>(noht, 0.0));
+    std::vector<std::vector<double>> mean_util(npass, std::vector<double>(noht, 0.0));
+    for (int pi = 0; pi < npass; ++pi) {
+        for (int oi = 0; oi < noht; ++oi) {
+            for (int si = 0; si < nseeds; ++si) {
+                sim::SimConfig cfg;
+                cfg.seed = seeds[si];
+                cfg.oht_count = ohts[oi];
+                cfg.arrival_per_sec = passes[pi].arrival;
+                cfg.speed = kSpeed;
+                sim::Simulation s(net, cfg);
+                s.setAvoidance(passes[pi].avoid != 0);
+                for (int k = 0; k < kWarmup; ++k) s.step(kDt);
+                int done_w = s.stats().jobs_done;
+                int maxdead = 0;
+                for (int k = 0; k < kMeasure; ++k) {
+                    s.step(kDt);
+                    if (k % 50 == 0) {  // deadlock persists once formed, so sampling is enough
+                        int d = s.stats().vehicles_deadlocked;
+                        if (d > maxdead) maxdead = d;
+                    }
+                }
+                sim::SimStats f = s.stats();
+                float tput = (f.jobs_done - done_w) / measure_min;
+                out << passes[pi].arrival << "," << passes[pi].avoid << "," << ohts[oi] << "," << seeds[si] << ","
+                    << tput << "," << f.utilization << "," << f.avg_delivery << ","
+                    << f.p95_delivery << "," << f.empty_ratio << "," << maxdead << ","
+                    << f.jobs_done << "\n";
+                mean_tput[pi][oi] += tput / nseeds;
+                mean_util[pi][oi] += f.utilization / nseeds;
+            }
+        }
+        std::printf("  pass %d (arrival %.1f, avoidance %d) done\n", pi + 1, passes[pi].arrival, passes[pi].avoid);
+    }
+    out.close();
+
+    std::ofstream p("data/params.csv");
+    p << "key,value\n";
+    p << "capacity_load_per_sec," << kCapacityLoad << "\n";
+    p << "service_load_per_sec," << kServiceLoad << "\n";
+    p << "oht_speed," << kSpeed << "\n";
+    p << "dt_seconds," << kDt << "\n";
+    p << "warmup_steps," << kWarmup << "\n";
+    p << "measure_steps," << kMeasure << "\n";
+    p << "seeds_per_point," << nseeds << "\n";
+    p << "oht_min," << ohts[0] << "\n";
+    p << "oht_max," << ohts[noht - 1] << "\n";
+    p << "nodes," << net.nodes().size() << "\n";
+    p << "segments," << net.segments().size() << "\n";
+    p.close();
+
+    // Console summary. Capacity peak (pass 0) and the service knee (pass 2: smallest fleet that reaches
+    // 95% of the achievable throughput, i.e. adding OHTs past it only drops utilization).
+    int cap_peak = 0;
+    for (int oi = 1; oi < noht; ++oi) if (mean_tput[0][oi] > mean_tput[0][cap_peak]) cap_peak = oi;
+    double svc_max = 0.0;
+    for (int oi = 0; oi < noht; ++oi) if (mean_tput[2][oi] > svc_max) svc_max = mean_tput[2][oi];
+    int knee = 0;
+    for (int oi = 0; oi < noht; ++oi) if (mean_tput[2][oi] >= 0.95 * svc_max) { knee = oi; break; }
+    std::printf("\ncapacity (arrival %.1f, ON): throughput peaks at %.1f /min, %d OHT\n",
+                kCapacityLoad, mean_tput[0][cap_peak], ohts[cap_peak]);
+    std::printf("service  (arrival %.1f = %.0f/min demand, ON): %d OHT reaches 95%% of achievable %.1f /min (util %.0f%%)\n",
+                kServiceLoad, kServiceLoad * 60.0f, ohts[knee], svc_max, mean_util[2][knee] * 100.0);
+    std::printf("wrote data/results.csv and data/params.csv\n");
+}
+
+// One (arrival, avoidance) curve over fleet size, aggregated across seeds with a 95% CI on throughput.
+struct SweepSeries {
+    float arrival = 0.0f;
+    int avoidance = 0;
+    std::vector<float> oht, tput, tput_lo, tput_hi, util, cycle;
+};
+
+// Loads data/results.csv (written by --sweep) and aggregates seeds into per-(arrival, avoidance) curves.
+static std::vector<SweepSeries> loadSweep(const char* path) {
+    std::vector<SweepSeries> out;
+    std::ifstream in(path);
+    if (!in) return out;
+
+    struct Row { float arrival; int avoid; int oht; float tput, util, cycle; };
+    std::vector<Row> rows;
+    std::string line;
+    std::getline(in, line);  // header
+    while (std::getline(in, line)) {
+        float a, av, o, seed, tp, ut, cy, p95, emp, md, done;
+        if (std::sscanf(line.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+                        &a, &av, &o, &seed, &tp, &ut, &cy, &p95, &emp, &md, &done) == 11) {
+            rows.push_back({a, static_cast<int>(av), static_cast<int>(o), tp, ut, cy});
+        }
+    }
+
+    std::vector<std::pair<float, int>> keys;  // distinct (arrival, avoidance), insertion order
+    for (const Row& r : rows) {
+        bool seen = false;
+        for (auto& k : keys) if (k.first == r.arrival && k.second == r.avoid) { seen = true; break; }
+        if (!seen) keys.push_back({r.arrival, r.avoid});
+    }
+    for (auto& k : keys) {
+        SweepSeries s;
+        s.arrival = k.first;
+        s.avoidance = k.second;
+        std::vector<int> ohts;
+        for (const Row& r : rows)
+            if (r.arrival == k.first && r.avoid == k.second &&
+                std::find(ohts.begin(), ohts.end(), r.oht) == ohts.end())
+                ohts.push_back(r.oht);
+        std::sort(ohts.begin(), ohts.end());
+        for (int o : ohts) {
+            std::vector<float> tp, ut, cy;
+            for (const Row& r : rows)
+                if (r.arrival == k.first && r.avoid == k.second && r.oht == o) {
+                    tp.push_back(r.tput); ut.push_back(r.util); cy.push_back(r.cycle);
+                }
+            int n = static_cast<int>(tp.size());
+            double m = 0; for (float v : tp) m += v; m /= n;
+            double var = 0; for (float v : tp) var += (v - m) * (v - m); var = n > 1 ? var / (n - 1) : 0.0;
+            double ci = n > 1 ? 1.96 * std::sqrt(var) / std::sqrt((double)n) : 0.0;
+            double um = 0; for (float v : ut) um += v; um /= n;
+            double cm = 0; for (float v : cy) cm += v; cm /= n;
+            s.oht.push_back(static_cast<float>(o));
+            s.tput.push_back(static_cast<float>(m));
+            s.tput_lo.push_back(static_cast<float>(m - ci));
+            s.tput_hi.push_back(static_cast<float>(m + ci));
+            s.util.push_back(static_cast<float>(um * 100.0));
+            s.cycle.push_back(static_cast<float>(cm));
+        }
+        out.push_back(s);
+    }
+    return out;
+}
+
+static const SweepSeries* findSeries(const std::vector<SweepSeries>& v, float arrival, int avoidance) {
+    for (const SweepSeries& s : v) if (s.arrival == arrival && s.avoidance == avoidance) return &s;
+    return nullptr;
+}
+
 int main(int argc, char** argv) {
     bool selftest = false;
     bool bench = false;
     bool deadlock = false;
+    bool sweep = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--selftest") == 0) selftest = true;
         else if (std::strcmp(argv[i], "--bench") == 0) bench = true;
         else if (std::strcmp(argv[i], "--deadlock") == 0) deadlock = true;
+        else if (std::strcmp(argv[i], "--sweep") == 0) sweep = true;
     }
 
     // Build the synthetic fab once; the headless modes and the live window all share it.
@@ -134,6 +307,10 @@ int main(int argc, char** argv) {
     }
     if (deadlock) {
         runDeadlockCheck(net);
+        return 0;
+    }
+    if (sweep) {
+        runSweep(net);
         return 0;
     }
 
@@ -215,6 +392,8 @@ int main(int argc, char** argv) {
     std::vector<float> tput_value(kPlotCap, 0.0f);
     int tput_count = 0;
     int tput_head = 0;
+
+    std::vector<SweepSeries> sweep_series = loadSweep("data/results.csv");  // STEP 6 batch results, if present
 
     if (selftest) {
         // Headless smoke test: overload the assignment path and verify job accounting holds.
@@ -326,6 +505,41 @@ int main(int argc, char** argv) {
         render::drawVehicles(dl, view, markers, veh_style);
 
         ImGui::Dummy(canvas_size);
+        ImGui::End();
+
+        ImGui::Begin("Analysis (batch results)");
+        if (sweep_series.empty()) {
+            ImGui::TextWrapped("No batch data. Run 'oht_mcs_simulator --sweep' to write data/results.csv, then restart.");
+        } else {
+            const SweepSeries* on = findSeries(sweep_series, 5.0f, 1);
+            const SweepSeries* off = findSeries(sweep_series, 5.0f, 0);
+            const SweepSeries* svc = findSeries(sweep_series, 0.2f, 1);
+            float ph = 200.0f * ui_scale;
+            if (on && off && ImPlot::BeginPlot("Throughput vs fleet (saturating load)", ImVec2(-1, ph))) {
+                ImPlot::SetupAxes("OHT count", "throughput (jobs/min)");
+                ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
+                ImPlot::PlotShaded("ON 95% CI", on->oht.data(), on->tput_lo.data(), on->tput_hi.data(),
+                                   static_cast<int>(on->oht.size()));
+                ImPlot::PopStyleVar();
+                ImPlot::PlotLine("avoidance ON", on->oht.data(), on->tput.data(), static_cast<int>(on->oht.size()));
+                ImPlot::PlotLine("avoidance OFF", off->oht.data(), off->tput.data(), static_cast<int>(off->oht.size()));
+                ImPlot::EndPlot();
+            }
+            if (svc && !svc->oht.empty() && ImPlot::BeginPlot("Utilization vs fleet (service load)", ImVec2(-1, ph))) {
+                ImPlot::SetupAxes("OHT count", "utilization (%)");
+                ImPlot::PlotLine("utilization", svc->oht.data(), svc->util.data(), static_cast<int>(svc->oht.size()));
+                float rx[2] = {svc->oht.front(), svc->oht.back()};
+                float ry[2] = {75.0f, 75.0f};
+                ImPlot::PlotLine("75% target", rx, ry, 2);
+                ImPlot::EndPlot();
+            }
+            if (svc && ImPlot::BeginPlot("Cycle time vs fleet (service load)", ImVec2(-1, ph))) {
+                ImPlot::SetupAxes("OHT count", "cycle time (s)");
+                ImPlot::PlotLine("avg cycle", svc->oht.data(), svc->cycle.data(), static_cast<int>(svc->oht.size()));
+                ImPlot::EndPlot();
+            }
+            ImGui::TextDisabled("Capture for the report. Regenerate with --sweep.");
+        }
         ImGui::End();
 
         ImGui::Render();
