@@ -74,20 +74,44 @@ void Simulation::generateJobs(float dt) {
     // exponential/poisson draw a variable, implementation-defined number of mt19937 values.
     arrival_accum_ += cfg_.arrival_per_sec * dt;
     std::uniform_int_distribution<std::size_t> pick(0, ports_.size() - 1);
+    std::uniform_real_distribution<float> coin(0.0f, 1.0f);
+    bool hot_lane = cfg_.hot_fraction > 0.0f && cfg_.hot_origin >= 0 && cfg_.hot_dest >= 0;
     while (arrival_accum_ >= 1.0f) {
         arrival_accum_ -= 1.0f;
-        std::size_t oi = pick(rng_);
-        std::size_t di = pick(rng_);
-        if (di == oi) di = (oi + 1) % ports_.size();
         Job job;
         job.id = static_cast<JobId>(jobs_.size());
-        job.origin = ports_[oi];
-        job.dest = ports_[di];
+        // A share of jobs follows the hot lane (concentrated demand); the rest are random. The coin is
+        // only drawn when a hot lane is set, so random-only runs keep their exact RNG sequence.
+        if (hot_lane && coin(rng_) < cfg_.hot_fraction) {
+            job.origin = cfg_.hot_origin;
+            job.dest = cfg_.hot_dest;
+        } else {
+            std::size_t oi = pick(rng_);
+            std::size_t di = pick(rng_);
+            if (di == oi) di = (oi + 1) % ports_.size();
+            job.origin = ports_[oi];
+            job.dest = ports_[di];
+        }
         job.created = clock_;
         jobs_.push_back(job);
         pending_.push_back(job.id);
         ++n_pending_;
     }
+}
+
+rail::PathResult Simulation::route(rail::NodeId from, rail::NodeId to) const {
+    if (lambda_ <= 0.0f) return rail::dijkstra(net_, from, to);  // static shortest path
+    // Congestion-aware cost: detour around busy segments. Weight stays positive, so Dijkstra is valid.
+    rail::EdgeCostFn cost = [this](const rail::RailSegment& s) {
+        return s.length * (1.0f + lambda_ * seg_congestion_[s.id]);
+    };
+    return rail::dijkstra(net_, from, to, cost);
+}
+
+float Simulation::pathLength(const rail::PathResult& p) const {
+    float len = 0.0f;
+    for (rail::SegmentId s : p.segments) len += net_.segments()[s].length;
+    return len;  // physical distance, independent of the routing cost weights
 }
 
 void Simulation::assignJobs() {
@@ -102,7 +126,7 @@ void Simulation::assignJobs() {
     for (const DispatchAssignment& a : picks) {
         Job& job = jobs_[a.job];
         Vehicle& v = vehicles_[a.vehicle];
-        rail::PathResult to_pickup = rail::dijkstra(net_, v.at, job.origin);
+        rail::PathResult to_pickup = route(v.at, job.origin);
         removed.insert(a.job);
         if (!to_pickup.found) continue;  // synthetic fab is connected; defensive only
 
@@ -112,7 +136,7 @@ void Simulation::assignJobs() {
         v.job = a.job;
         v.state = VehState::ToPickup;
         setRoute(v, to_pickup);
-        empty_dist_ += to_pickup.distance;
+        empty_dist_ += pathLength(to_pickup);
         ++n_active_;
     }
 
@@ -282,7 +306,7 @@ void Simulation::onArrival(Vehicle& v) {
 
     if (v.state == VehState::ToPickup) {
         Job& job = jobs_[v.job];
-        rail::PathResult to_dest = rail::dijkstra(net_, v.at, job.dest);
+        rail::PathResult to_dest = route(v.at, job.dest);
         if (!to_dest.found) {  // defensive: unreachable destination, release without a phantom completion
             job.state = JobState::Done;
             v.job = -1;
@@ -297,7 +321,7 @@ void Simulation::onArrival(Vehicle& v) {
         job.picked = clock_;
         v.state = VehState::Carrying;
         setRoute(v, to_dest);
-        loaded_dist_ += to_dest.distance;
+        loaded_dist_ += pathLength(to_dest);
     } else if (v.state == VehState::Carrying) {
         Job& job = jobs_[v.job];
         job.state = JobState::Done;

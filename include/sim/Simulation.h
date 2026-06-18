@@ -51,6 +51,9 @@ struct SimConfig {
     int oht_count = 10;
     float speed = 80.0f;            // world units per sim second
     float arrival_per_sec = 0.6f;   // job creation rate
+    float hot_fraction = 0.0f;      // fraction of jobs forced onto a hot lane (0 = all random)
+    rail::NodeId hot_origin = -1;   // hot-lane pickup/dropoff ports, used when hot_fraction > 0
+    rail::NodeId hot_dest = -1;
 };
 
 struct SimStats {
@@ -83,6 +86,13 @@ public:
     void setPolicy(const DispatchPolicy* p) { policy_ = p; }  // swap the dispatching strategy live
     void setAvoidance(bool on) { avoidance_ = on; }           // ON = deadlock-avoidance gate, OFF = greedy
     bool avoidance() const { return avoidance_; }
+    void setRoutingLambda(float lam) { lambda_ = lam < 0.0f ? 0.0f : lam; }  // congestion weight in routing
+    float routingLambda() const { return lambda_; }
+    void setHotspot(float frac, rail::NodeId origin, rail::NodeId dest) {     // concentrate demand on one lane
+        cfg_.hot_fraction = frac < 0.0f ? 0.0f : frac;
+        cfg_.hot_origin = origin;
+        cfg_.hot_dest = dest;
+    }
 
     const std::vector<Vehicle>& vehicles() const { return vehicles_; }
     rail::Vec2 vehicleWorldPos(const Vehicle& v) const;
@@ -99,6 +109,8 @@ private:
     bool safeToEnter(const Vehicle& mover, rail::SegmentId next) const;  // banker-style safe-state check
     void releaseHeld(Vehicle& v);
     int countDeadlocked() const;                                       // vehicles trapped in a wait-for cycle
+    rail::PathResult route(rail::NodeId from, rail::NodeId to) const;   // congestion-aware when lambda > 0
+    float pathLength(const rail::PathResult& p) const;                 // physical length, for distance accounting
     void onArrival(Vehicle& v);
     void reconcileFleet();
     void recomputeOccupancy();
@@ -124,6 +136,7 @@ private:
     std::vector<VehicleId> seg_owner_;    // segment -> owning vehicle id, -1 if free (capacity 1)
     std::vector<float> seg_congestion_;   // per-segment occupancy EMA in [0,1] for the live heatmap
     bool avoidance_ = true;               // ON = safe-state admission gate; OFF = greedy (can deadlock)
+    float lambda_ = 0.0f;                 // congestion-aware routing weight (0 = static shortest path)
 
     std::vector<rail::NodeId> depots_;    // ring junctions where vehicles spawn
     std::vector<rail::NodeId> ports_;     // candidate job origins and destinations

@@ -198,6 +198,55 @@ static void runSweep(const rail::RailNetwork& net) {
     std::printf("wrote data/results.csv and data/params.csv\n");
 }
 
+// Routing experiment: fix fleet and load, sweep the congestion weight lambda. lambda 0 is static
+// shortest path; lambda > 0 detours around busy segments. Expect cycle time to fall then rise (a
+// U-curve: too much detouring hurts), demonstrating an optimal congestion sensitivity.
+static void runRouteBench(const rail::RailNetwork& net, const rail::FabDemo& demo) {
+    const unsigned seeds[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const int nseeds = static_cast<int>(sizeof(seeds) / sizeof(seeds[0]));
+    const float lambdas[] = {0.0f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+    const int nlam = static_cast<int>(sizeof(lambdas) / sizeof(lambdas[0]));
+    const int kWarmup = 1500, kMeasure = 4500;
+    const float dt = 0.05f;
+    const float measure_min = kMeasure * dt / 60.0f;
+    sim::SimConfig base;
+    base.oht_count = 14;
+    base.arrival_per_sec = 0.3f;   // concentrated demand congests the bottleneck lane
+    base.hot_fraction = 0.6f;      // 60% of jobs run the bay-0 to bay-6 lane across the chord
+    base.hot_origin = demo.start;
+    base.hot_dest = demo.goal;
+
+    std::printf("\nrouting benchmark: %d OHT, %.2f job/s (%.0f%% hot lane), %d seeds, lambda sweep (w = len*(1+lambda*cong))\n",
+                base.oht_count, base.arrival_per_sec, base.hot_fraction * 100.0f, nseeds);
+    std::filesystem::create_directories("data");
+    std::ofstream out("data/route.csv");
+    out << "lambda,seed,avg_cyc,p95_cyc,throughput_per_min,empty_ratio\n";
+    std::printf("%8s %9s %9s %9s %8s\n", "lambda", "avg_cyc", "p95_cyc", "tput/min", "empty%");
+    for (int li = 0; li < nlam; ++li) {
+        double cyc = 0, p95 = 0, tp = 0, emp = 0;
+        for (int si = 0; si < nseeds; ++si) {
+            sim::SimConfig cfg = base;
+            cfg.seed = seeds[si];
+            sim::Simulation s(net, cfg);
+            s.setRoutingLambda(lambdas[li]);
+            for (int k = 0; k < kWarmup; ++k) s.step(dt);
+            int done_w = s.stats().jobs_done;
+            for (int k = 0; k < kMeasure; ++k) s.step(dt);
+            sim::SimStats f = s.stats();
+            float t = (f.jobs_done - done_w) / measure_min;
+            out << lambdas[li] << "," << seeds[si] << "," << f.avg_delivery << ","
+                << f.p95_delivery << "," << t << "," << f.empty_ratio << "\n";
+            cyc += f.avg_delivery / nseeds;
+            p95 += f.p95_delivery / nseeds;
+            tp += t / nseeds;
+            emp += f.empty_ratio * 100.0 / nseeds;
+        }
+        std::printf("%8.1f %9.1f %9.1f %9.1f %7.0f%%\n", lambdas[li], cyc, p95, tp, emp);
+    }
+    out.close();
+    std::printf("wrote data/route.csv\n");
+}
+
 // One (arrival, avoidance) curve over fleet size, aggregated across seeds with a 95% CI on throughput.
 struct SweepSeries {
     float arrival = 0.0f;
@@ -268,16 +317,57 @@ static const SweepSeries* findSeries(const std::vector<SweepSeries>& v, float ar
     return nullptr;
 }
 
+// Routing lambda sweep aggregated across seeds, for the U-curve figure.
+struct RouteSeries {
+    std::vector<float> lambda, cyc, cyc_lo, cyc_hi, p95;
+};
+
+static RouteSeries loadRoute(const char* path) {
+    RouteSeries s;
+    std::ifstream in(path);
+    if (!in) return s;
+    struct Row { float lam, cyc, p95; };
+    std::vector<Row> rows;
+    std::string line;
+    std::getline(in, line);  // header
+    while (std::getline(in, line)) {
+        float lam, seed, cyc, p95, tp, emp;
+        if (std::sscanf(line.c_str(), "%f,%f,%f,%f,%f,%f", &lam, &seed, &cyc, &p95, &tp, &emp) == 6)
+            rows.push_back({lam, cyc, p95});
+    }
+    std::vector<float> lams;
+    for (const Row& r : rows)
+        if (std::find(lams.begin(), lams.end(), r.lam) == lams.end()) lams.push_back(r.lam);
+    std::sort(lams.begin(), lams.end());
+    for (float L : lams) {
+        std::vector<float> c, p;
+        for (const Row& r : rows) if (r.lam == L) { c.push_back(r.cyc); p.push_back(r.p95); }
+        int n = static_cast<int>(c.size());
+        double m = 0; for (float v : c) m += v; m /= n;
+        double var = 0; for (float v : c) var += (v - m) * (v - m); var = n > 1 ? var / (n - 1) : 0.0;
+        double ci = n > 1 ? 1.96 * std::sqrt(var) / std::sqrt((double)n) : 0.0;
+        double pm = 0; for (float v : p) pm += v; pm /= n;
+        s.lambda.push_back(L);
+        s.cyc.push_back(static_cast<float>(m));
+        s.cyc_lo.push_back(static_cast<float>(m - ci));
+        s.cyc_hi.push_back(static_cast<float>(m + ci));
+        s.p95.push_back(static_cast<float>(pm));
+    }
+    return s;
+}
+
 int main(int argc, char** argv) {
     bool selftest = false;
     bool bench = false;
     bool deadlock = false;
     bool sweep = false;
+    bool route = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--selftest") == 0) selftest = true;
         else if (std::strcmp(argv[i], "--bench") == 0) bench = true;
         else if (std::strcmp(argv[i], "--deadlock") == 0) deadlock = true;
         else if (std::strcmp(argv[i], "--sweep") == 0) sweep = true;
+        else if (std::strcmp(argv[i], "--route") == 0) route = true;
     }
 
     // Build the synthetic fab once; the headless modes and the live window all share it.
@@ -311,6 +401,10 @@ int main(int argc, char** argv) {
     }
     if (sweep) {
         runSweep(net);
+        return 0;
+    }
+    if (route) {
+        runRouteBench(net, demo);
         return 0;
     }
 
@@ -378,6 +472,8 @@ int main(int argc, char** argv) {
     simulation.setPolicy(policies[policy_sel]);
     const char* policy_names[3] = {policies[0]->name(), policies[1]->name(), policies[2]->name()};
     bool ui_avoid = simulation.avoidance();
+    float ui_lambda = simulation.routingLambda();
+    bool ui_hot = false;
     int ui_oht_count = sim_cfg.oht_count;
     float ui_arrival = sim_cfg.arrival_per_sec;
     float sim_speed = 4.0f;
@@ -393,7 +489,8 @@ int main(int argc, char** argv) {
     int tput_count = 0;
     int tput_head = 0;
 
-    std::vector<SweepSeries> sweep_series = loadSweep("data/results.csv");  // STEP 6 batch results, if present
+    std::vector<SweepSeries> sweep_series = loadSweep("data/results.csv");  // batch sweep results, if present
+    RouteSeries route_series = loadRoute("data/route.csv");                 // routing lambda sweep, if present
 
     if (selftest) {
         // Headless smoke test: overload the assignment path and verify job accounting holds.
@@ -460,6 +557,8 @@ int main(int argc, char** argv) {
         if (ImGui::Checkbox("Deadlock avoidance", &ui_avoid)) simulation.setAvoidance(ui_avoid);
         ImGui::SameLine();
         ImGui::TextDisabled(ui_avoid ? "(ON: safe-state gate)" : "(OFF: greedy, may deadlock)");
+        if (ImGui::SliderFloat("Route congestion lambda", &ui_lambda, 0.0f, 8.0f, "%.1f")) simulation.setRoutingLambda(ui_lambda);
+        if (ImGui::Checkbox("Hot lane demand", &ui_hot)) simulation.setHotspot(ui_hot ? 0.5f : 0.0f, demo.start, demo.goal);
         ImGui::Separator();
         ImGui::Text("OHT live %d / target %d   (busy %d, retiring %d)",
                     st.vehicles_live, st.vehicles_target, st.vehicles_busy, st.vehicles_retiring);
@@ -508,13 +607,13 @@ int main(int argc, char** argv) {
         ImGui::End();
 
         ImGui::Begin("Analysis (batch results)");
-        if (sweep_series.empty()) {
-            ImGui::TextWrapped("No batch data. Run 'oht_mcs_simulator --sweep' to write data/results.csv, then restart.");
+        float ph = 200.0f * ui_scale;
+        if (sweep_series.empty() && route_series.lambda.empty()) {
+            ImGui::TextWrapped("No batch data. Run --sweep and/or --route to write data/*.csv, then restart.");
         } else {
             const SweepSeries* on = findSeries(sweep_series, 5.0f, 1);
             const SweepSeries* off = findSeries(sweep_series, 5.0f, 0);
             const SweepSeries* svc = findSeries(sweep_series, 0.2f, 1);
-            float ph = 200.0f * ui_scale;
             if (on && off && ImPlot::BeginPlot("Throughput vs fleet (saturating load)", ImVec2(-1, ph))) {
                 ImPlot::SetupAxes("OHT count", "throughput (jobs/min)");
                 ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
@@ -538,7 +637,19 @@ int main(int argc, char** argv) {
                 ImPlot::PlotLine("avg cycle", svc->oht.data(), svc->cycle.data(), static_cast<int>(svc->oht.size()));
                 ImPlot::EndPlot();
             }
-            ImGui::TextDisabled("Capture for the report. Regenerate with --sweep.");
+            if (!route_series.lambda.empty() &&
+                ImPlot::BeginPlot("Cycle time vs routing lambda (hot lane)", ImVec2(-1, ph))) {
+                ImPlot::SetupAxes("congestion weight lambda", "cycle time (s)");
+                int n = static_cast<int>(route_series.lambda.size());
+                ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
+                ImPlot::PlotShaded("avg 95% CI", route_series.lambda.data(), route_series.cyc_lo.data(),
+                                   route_series.cyc_hi.data(), n);
+                ImPlot::PopStyleVar();
+                ImPlot::PlotLine("avg cycle", route_series.lambda.data(), route_series.cyc.data(), n);
+                ImPlot::PlotLine("p95 cycle", route_series.lambda.data(), route_series.p95.data(), n);
+                ImPlot::EndPlot();
+            }
+            ImGui::TextDisabled("Capture for the report. Regenerate with --sweep / --route.");
         }
         ImGui::End();
 
